@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# ccrm — จัดการ sessions ของ Claude Code + Codex + Kimi + Gemini แบบ interactive (fzf)
+# รองรับ macOS (bash/zsh) และ Linux/WSL
+# ใช้: ccrm      → Claude (project ปัจจุบัน) + Codex/Kimi/Gemini ทั้งหมด
+#      ccrm -a   → Claude ทุก project + Codex/Kimi/Gemini ทั้งหมด
+# คีย์: Enter=resume session ที่เลือก
+#       Tab=เลือกจะลบ, กด Tab อีกครั้งบนบรรทัดเดิม=ยืนยันลบ
+#       Esc=ยกเลิก
+# หมายเหตุ gemini: --resume ของตัว CLI เองรับแค่ "latest"/index ผูกกับ project ปัจจุบัน
+#   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
+set -uo pipefail
+
+base="$HOME/.claude/projects"
+os="$(uname)"
+
+if [[ "$os" == "Darwin" ]]; then
+  _mtime_epoch() { stat -f '%m' "$1"; }
+  _mtime_fmt()   { stat -f '%Sm' -t '%d/%m %H:%M' "$1"; }
+else
+  _mtime_epoch() { stat -c '%Y' "$1"; }
+  _mtime_fmt()   { date -d "@$(stat -c '%Y' "$1")" '+%d/%m %H:%M'; }
+fi
+
+label_of() {
+  local f="$1" t=""
+  case "$f" in
+    */.codex/*)
+      t=$(head -c 500000 "$f" | jq -r 'select(.type=="response_item" and .payload.role=="user") | .payload.content[]? | select(.type=="input_text") | .text | select(startswith("<")|not)' 2>/dev/null \
+          | head -1 | cut -c1-70)
+      ;;
+    */.kimi-code/*)
+      t=$(jq -r '.title // empty' "$f" 2>/dev/null)
+      if [[ -z "$t" || "$t" == "New Session" ]]; then
+        t=$(jq -r 'select(.type=="turn.prompt" and .origin.kind=="user") | .input[]? | select(.type=="text") | .text' "$(dirname "$f")/agents/main/wire.jsonl" 2>/dev/null | head -1)
+      fi
+      t="${t:0:70}"
+      ;;
+    */.gemini/*)
+      t=$(jq -r '.messages[]? | select(.type=="user") | .content[]? | select(.text) | .text' "$f" 2>/dev/null | head -1)
+      t="${t:0:70}"
+      ;;
+    *)
+      t=$(grep -m1 -o '"customTitle":"[^"]*"' "$f" 2>/dev/null | head -1 | sed 's/"customTitle":"//;s/"$//')
+      if [[ -z "$t" ]]; then
+        t=$(head -c 300000 "$f" | jq -r 'select(.type=="user" and (.isMeta!=true)) | .message.content | if type=="string" then . else ([.[]|select(.type=="text")|.text]|join(" ")) end' 2>/dev/null \
+            | grep -v '^<' | head -1 | cut -c1-70)
+      fi
+      ;;
+  esac
+  echo "${t:-(ว่าง)}"
+}
+
+_list() {
+  local claude_files codex_files kimi_files gemini_files files
+  if [[ "${1:-}" == "-a" ]]; then
+    claude_files=$(find "$base" -mindepth 2 -maxdepth 2 -name '*.jsonl' -type f 2>/dev/null)
+  else
+    local proj="${PWD//[\/.]/-}"
+    claude_files=$(find "$base/$proj" -maxdepth 1 -name '*.jsonl' -type f 2>/dev/null)
+  fi
+  codex_files=$(find "$HOME/.codex/sessions" "$HOME/.codex/archived_sessions" -name '*.jsonl' -type f 2>/dev/null)
+  kimi_files=$(find "$HOME/.kimi-code/sessions" -mindepth 3 -maxdepth 3 -name 'state.json' -type f 2>/dev/null)
+  gemini_files=$(find "$HOME/.gemini/tmp" -mindepth 2 -path '*/chats/*' -name '*.json' -type f 2>/dev/null)
+  files=$(printf '%s\n%s\n%s\n%s\n' "$claude_files" "$codex_files" "$kimi_files" "$gemini_files" | grep -v '^$')
+  [[ -n "$files" ]] || return 0
+
+  while IFS= read -r f; do
+    case "$f" in
+      */.codex/*)     tag="codex "; out="$f" ;;
+      */.kimi-code/*) tag="kimi  "; out="$(dirname "$f")" ;;
+      */.gemini/*)    tag="gemini"; out="$f" ;;
+      *)              tag="claude"; out="$f" ;;
+    esac
+    sz=$(du -sh "$out" 2>/dev/null | cut -f1)
+    dt=$(_mtime_fmt "$f")
+    printf '%s\t%s\t%s\t%s\t%7s\t%s\n' "$(_mtime_epoch "$f")" "$out" "$tag" "$dt" "$sz" "$(label_of "$f" | tr '\t\n' '  ')"
+  done <<< "$files" | sort -rn | cut -f2-
+}
+
+if [[ "${1:-}" == "--list" ]]; then
+  _list "${2:-}"
+  exit 0
+fi
+
+list=$(_list "${1:-}")
+[[ -n "$list" ]] || { echo "ไม่พบ session"; exit 0; }
+
+total=$(echo "$list" | wc -l | tr -d ' ')
+reload_cmd="$0 --list ${1:-}"
+
+picked=$(echo "$list" | fzf --multi --delimiter=$'\t' --with-nth=2.. \
+  --header="รวม $total sessions  |  Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Esc=ยกเลิก" \
+  --preview 'f={1}; case "$f" in
+    */.codex/*) head -c 500000 "$f" | jq -r "select(.type==\"response_item\" and .payload.role==\"user\") | .payload.content[]? | select(.type==\"input_text\") | .text | select(startswith(\"<\")|not)" 2>/dev/null ;;
+    */.kimi-code/*) jq -r "select(.type==\"turn.prompt\" and .origin.kind==\"user\") | .input[]? | select(.type==\"text\") | .text" "$f/agents/main/wire.jsonl" 2>/dev/null ;;
+    */.gemini/*) jq -r ".messages[]? | select(.type==\"user\") | .content[]? | select(.text) | .text" "$f" 2>/dev/null ;;
+    *) head -c 300000 "$f" | jq -r "select(.type==\"user\" and (.isMeta!=true)) | .message.content | if type==\"string\" then . else ([.[]|select(.type==\"text\")|.text]|join(\" \")) end" 2>/dev/null ;;
+  esac | grep -v "^<" | head -30' \
+  --preview-window=right:50%:wrap \
+  --bind "tab:transform:if [ \"\$FZF_SELECT_COUNT\" -gt 0 ] && [ {+1} = {1} ]; then echo \"execute-silent(rm -rf {1})+reload($reload_cmd)+clear-selection\"; else echo 'clear-selection+toggle'; fi") || exit 0
+
+[[ -n "$picked" ]] || exit 0
+
+spath=$(echo "$picked" | cut -f1)
+tag=$(echo "$picked" | cut -f2 | tr -d ' ')
+
+case "$tag" in
+  codex)
+    id=$(basename "$spath" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+    exec codex resume "$id" --yolo
+    ;;
+  kimi)
+    id=$(basename "$spath")
+    workdir=$(jq -r '.workDir // empty' "$spath/state.json" 2>/dev/null)
+    [[ -n "$workdir" ]] && cd "$workdir"
+    exec kimi -r "$id" --yolo
+    ;;
+  gemini)
+    projdir=$(dirname "$(dirname "$spath")")
+    root=$(cat "$projdir/.project_root" 2>/dev/null)
+    [[ -n "$root" ]] && cd "$root"
+    exec gemini --session-file "$spath" -y
+    ;;
+  *)
+    id=$(basename "$spath" .jsonl)
+    exec claude --resume "$id" --dangerously-skip-permissions
+    ;;
+esac
