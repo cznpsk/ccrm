@@ -25,8 +25,14 @@ label_of() {
   local f="$1" t=""
   case "$f" in
     */.codex/*)
-      t=$(head -c 500000 "$f" | jq -r 'select(.type=="response_item" and .payload.role=="user") | .payload.content[]? | select(.type=="input_text") | .text | select(startswith("<")|not)' 2>/dev/null \
-          | head -1 | cut -c1-70)
+      local id
+      id=$(basename "$f" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+      t=$(grep -F "\"$id\"" "$HOME/.codex/session_index.jsonl" 2>/dev/null | tail -1 | jq -r '.thread_name // empty' 2>/dev/null)
+      if [[ -z "$t" ]]; then
+        t=$(head -c 500000 "$f" | jq -r 'select(.type=="response_item" and .payload.role=="user") | .payload.content[]? | select(.type=="input_text") | .text | select(startswith("<")|not)' 2>/dev/null \
+            | head -1)
+      fi
+      t="${t:0:70}"
       ;;
     */.kimi-code/*)
       t=$(jq -r '.title // empty' "$f" 2>/dev/null)

@@ -81,6 +81,18 @@ function Get-ClaudeLabel([string]$sPath) {
 }
 
 function Get-CodexLabel([string]$sPath) {
+  $fname = [System.IO.Path]::GetFileNameWithoutExtension($sPath)
+  if ($fname -match '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})') {
+    $id = $matches[1]
+    $idx = Join-Path $HOME '.codex\session_index.jsonl'
+    $m = Select-String -LiteralPath $idx -Pattern ('"' + $id + '"') -SimpleMatch -ErrorAction SilentlyContinue | Select-Object -Last 1
+    if ($m) {
+      try {
+        $name = ($m.Line | ConvertFrom-Json).thread_name
+        if ($name) { return $name.Substring(0, [Math]::Min(70, $name.Length)) }
+      } catch {}
+    }
+  }
   $lines = Get-Content -LiteralPath $sPath -TotalCount 200 -Encoding UTF8 -ErrorAction SilentlyContinue
   foreach ($line in $lines) {
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
