@@ -271,9 +271,20 @@ if (-not $fzf) {
   exit 1
 }
 
+$ver = 10
+$verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
+# เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
+Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 'https://raw.githubusercontent.com/cznpsk/ccrm/main/VERSION').Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
+$updateNote = ''
+if (Test-Path $verCache) {
+  $latest = (Get-Content -LiteralPath $verCache -Raw -ErrorAction SilentlyContinue)
+  if ($latest) { $latest = $latest.Trim() }
+  if ($latest -and $latest -ne "$ver") { $updateNote = "  |  v$latest มาแล้ว — พิมพ์: ccrm update" }
+}
+
 $scriptPath = $PSCommandPath
 $psBase = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' + $scriptPath + '"'
-$header = "รวม $($rows.Count) sessions  |  Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Esc=ยกเลิก"
+$header = "รวม $($rows.Count) sessions  |  Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Esc=ยกเลิก$updateNote"
 $previewCmd = $psBase + ' -PreviewLine -Line "{r}"'
 $allFlag = if ($All) { ' -All' } else { '' }
 $tabBind = 'tab:transform:' + $psBase + ' -TabTransform -Sel {+1} -Cur {1}' + $allFlag

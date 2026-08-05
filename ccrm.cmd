@@ -1,3 +1,7 @@
 @echo off
 chcp 65001 >nul
+if "%~1"=="update" (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/cznpsk/ccrm/main/install.ps1 | iex"
+  exit /b
+)
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ccrm-core.ps1" %*
