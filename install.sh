@@ -29,7 +29,7 @@ mkdir -p "$HOME/.local/bin"
 if [[ -n "$script_dir" && -f "$script_dir/ccrm" ]]; then
   cp "$script_dir/ccrm" "$HOME/.local/bin/ccrm"
 else
-  curl -fsSL "$raw/ccrm" -o "$HOME/.local/bin/ccrm"
+  curl -fsSL "$raw/ccrm?ts=$(date +%s)" -o "$HOME/.local/bin/ccrm"
 fi
 chmod +x "$HOME/.local/bin/ccrm"
 echo "ติดตั้ง ccrm ไปที่ ~/.local/bin/ccrm แล้ว"
@@ -52,4 +52,4 @@ for c in claude codex; do
 done
 
 echo ""
-echo "ติดตั้งเสร็จ — พิมพ์ ccrm เพื่อใช้งาน (ccrm -a ดูทุก project)"
+echo "ติดตั้งเสร็จ v$(grep -m1 '^ver=' "$HOME/.local/bin/ccrm" | cut -d= -f2) — พิมพ์ ccrm เพื่อใช้งาน (ccrm -a ดูทุก project)"

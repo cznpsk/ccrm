@@ -20,6 +20,13 @@ param(
 $OutputEncoding = [System.Text.Encoding]::UTF8
 try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
+# กันกรณี ccrm.cmd เวอร์ชันเก่าส่ง "update" ทะลุมาเป็น positional arg
+if ($Line -eq 'update') {
+  $u = 'https://raw.githubusercontent.com/cznpsk/ccrm/main/install.ps1?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds()
+  Invoke-Expression (Invoke-WebRequest -UseBasicParsing -Uri $u).Content
+  exit 0
+}
+
 if ($DeletePath) {
   if ($Target) { Remove-Item -LiteralPath $Target -Recurse -Force -ErrorAction SilentlyContinue }
   exit 0
@@ -284,10 +291,10 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 11
+$ver = 12
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
-Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 'https://raw.githubusercontent.com/cznpsk/ccrm/main/VERSION').Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
+Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://raw.githubusercontent.com/cznpsk/ccrm/main/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
 $updateNote = ''
 if (Test-Path $verCache) {
   $latest = Read-FileRaw $verCache

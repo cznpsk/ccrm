@@ -10,17 +10,18 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=11
+ver=12
 raw="https://raw.githubusercontent.com/cznpsk/ccrm/main"
 
 if [[ "${1:-}" == "update" ]]; then
-  exec bash -c "curl -fsSL $raw/install.sh | bash"
+  # ?ts= กัน CDN cache ของ raw.githubusercontent (แคช ~5 นาที)
+  exec bash -c "curl -fsSL '$raw/install.sh?ts=$(date +%s)' | bash"
 fi
 
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 ver_cache="$HOME/.cache/ccrm-latest"
 mkdir -p "$HOME/.cache"
-( curl -fsSL --max-time 3 "$raw/VERSION" -o "$ver_cache.tmp" 2>/dev/null && mv "$ver_cache.tmp" "$ver_cache" ) &
+( curl -fsSL --max-time 3 "$raw/VERSION?ts=$(date +%s)" -o "$ver_cache.tmp" 2>/dev/null && mv "$ver_cache.tmp" "$ver_cache" ) &
 latest=$(cat "$ver_cache" 2>/dev/null | tr -d '[:space:]')
 update_note=""
 [[ -n "$latest" && "$latest" != "$ver" ]] && update_note="  |  ⬆ v$latest มาแล้ว — พิมพ์: ccrm update"

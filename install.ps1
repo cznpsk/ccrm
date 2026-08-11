@@ -22,7 +22,8 @@ foreach ($f in 'ccrm-core.ps1', 'ccrm.cmd') {
   if ($dir -and (Test-Path (Join-Path $dir $f))) {
     Copy-Item (Join-Path $dir $f) $dest -Force
   } else {
-    Invoke-WebRequest -UseBasicParsing -Uri "$raw/$f" -OutFile $dest
+    $ts = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+    Invoke-WebRequest -UseBasicParsing -Uri "$raw/$f`?ts=$ts" -OutFile $dest
   }
 }
 Write-Host "ติดตั้ง ccrm ไปที่ $binDir แล้ว"
@@ -49,5 +50,7 @@ foreach ($c in 'claude', 'codex') {
   }
 }
 
+$verLine = Select-String -LiteralPath (Join-Path $binDir 'ccrm-core.ps1') -Pattern '^\$ver = (\d+)' | Select-Object -First 1
+$installedVer = if ($verLine) { $verLine.Matches[0].Groups[1].Value } else { '?' }
 Write-Host ''
-Write-Host 'ติดตั้งเสร็จ — เปิด terminal ใหม่แล้วพิมพ์ ccrm'
+Write-Host "ติดตั้งเสร็จ v$installedVer — เปิด terminal ใหม่แล้วพิมพ์ ccrm"
