@@ -10,7 +10,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=10
+ver=11
 raw="https://raw.githubusercontent.com/cznpsk/ccrm/main"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -61,7 +61,7 @@ label_of() {
       t="${t:0:70}"
       ;;
     *)
-      t=$(grep -m1 -o '"customTitle":"[^"]*"' "$f" 2>/dev/null | head -1 | sed 's/"customTitle":"//;s/"$//')
+      t=$(grep -o '"customTitle":"[^"]*"' "$f" 2>/dev/null | tail -1 | sed 's/"customTitle":"//;s/"$//')
       if [[ -z "$t" ]]; then
         t=$(head -c 300000 "$f" | jq -r 'select(.type=="user" and (.isMeta!=true)) | .message.content | if type=="string" then . else ([.[]|select(.type=="text")|.text]|join(" ")) end' 2>/dev/null \
             | grep -v '^<' | head -1 | cut -c1-70)

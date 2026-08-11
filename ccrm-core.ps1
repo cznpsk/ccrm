@@ -38,6 +38,18 @@ if ($TabTransform) {
   exit 0
 }
 
+# อ่านไฟล์ผ่าน .NET ตรงๆ — เลี่ยง Get-Content -Encoding ที่เป็น dynamic param แล้วพังบนบางเครื่อง (PS 5.1)
+function Read-FileLines([string]$p, [int]$max = 0) {
+  try {
+    if ($max -gt 0) { return @([System.IO.File]::ReadLines($p) | Select-Object -First $max) }
+    return @([System.IO.File]::ReadAllLines($p))
+  } catch { return @() }
+}
+
+function Read-FileRaw([string]$p) {
+  try { return [System.IO.File]::ReadAllText($p) } catch { return $null }
+}
+
 function Format-Size([long]$bytes) {
   if ($bytes -ge 1GB) { return ("{0:N1}G" -f ($bytes / 1GB)) }
   elseif ($bytes -ge 1MB) { return ("{0:N1}M" -f ($bytes / 1MB)) }
@@ -52,12 +64,13 @@ function Get-DirSize([string]$dir) {
 }
 
 function Get-ClaudeLabel([string]$sPath) {
-  $lines = Get-Content -LiteralPath $sPath -TotalCount 200 -Encoding UTF8 -ErrorAction SilentlyContinue
-  $m = $lines | Select-String -Pattern '"customTitle":"([^"]*)"' | Select-Object -First 1
+  # customTitle มาจาก /rename — โดน append ท้ายไฟล์ ต้อง scan ทั้งไฟล์ เอาอันล่าสุด
+  $m = Select-String -LiteralPath $sPath -Pattern '"customTitle":"([^"]*)"' -ErrorAction SilentlyContinue | Select-Object -Last 1
   if ($m) {
     $val = $m.Matches[0].Groups[1].Value
-    return $val.Substring(0, [Math]::Min(70, $val.Length))
+    if ($val) { return $val.Substring(0, [Math]::Min(70, $val.Length)) }
   }
+  $lines = Read-FileLines $sPath 200
   foreach ($line in $lines) {
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
     $obj = $null
@@ -93,7 +106,7 @@ function Get-CodexLabel([string]$sPath) {
       } catch {}
     }
   }
-  $lines = Get-Content -LiteralPath $sPath -TotalCount 200 -Encoding UTF8 -ErrorAction SilentlyContinue
+  $lines = Read-FileLines $sPath 200
   foreach ($line in $lines) {
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
     $obj = $null
@@ -113,12 +126,12 @@ function Get-KimiLabel([string]$sessionDir) {
   $statePath = Join-Path $sessionDir 'state.json'
   $title = $null
   try {
-    $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+    $state = Read-FileRaw $statePath | ConvertFrom-Json
     if ($state.title -and $state.title -ne 'New Session') { $title = $state.title }
   } catch {}
   if (-not $title) {
     $wirePath = Join-Path $sessionDir 'agents\main\wire.jsonl'
-    $lines = Get-Content -LiteralPath $wirePath -Encoding UTF8 -ErrorAction SilentlyContinue
+    $lines = Read-FileLines $wirePath
     foreach ($line in $lines) {
       if ([string]::IsNullOrWhiteSpace($line)) { continue }
       $obj = $null
@@ -137,7 +150,7 @@ function Get-KimiLabel([string]$sessionDir) {
 
 function Get-GeminiLabel([string]$sPath) {
   try {
-    $data = Get-Content -LiteralPath $sPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+    $data = Read-FileRaw $sPath | ConvertFrom-Json
   } catch { return '(ว่าง)' }
   foreach ($m in $data.messages) {
     if ($m.type -eq 'user') {
@@ -219,7 +232,7 @@ if ($PreviewLine) {
   $tag = $fields[1]
   if ($tag -eq 'kimi') {
     $wirePath = Join-Path $sPath 'agents\main\wire.jsonl'
-    $lines = Get-Content -LiteralPath $wirePath -Encoding UTF8 -ErrorAction SilentlyContinue
+    $lines = Read-FileLines $wirePath
     foreach ($ln in $lines) {
       if ([string]::IsNullOrWhiteSpace($ln)) { continue }
       $o = $null
@@ -230,13 +243,13 @@ if ($PreviewLine) {
     }
   } elseif ($tag -eq 'gemini') {
     try {
-      $data = Get-Content -LiteralPath $sPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+      $data = Read-FileRaw $sPath | ConvertFrom-Json
       foreach ($m in $data.messages) {
         if ($m.type -eq 'user') { foreach ($c in $m.content) { if ($c.text) { $c.text } } }
       }
     } catch {}
   } else {
-    $lines = Get-Content -LiteralPath $sPath -TotalCount 2000 -Encoding UTF8 -ErrorAction SilentlyContinue
+    $lines = Read-FileLines $sPath 2000
     foreach ($ln in $lines) {
       if ([string]::IsNullOrWhiteSpace($ln)) { continue }
       $o = $null
@@ -271,13 +284,13 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 10
+$ver = 11
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 'https://raw.githubusercontent.com/cznpsk/ccrm/main/VERSION').Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
 $updateNote = ''
 if (Test-Path $verCache) {
-  $latest = (Get-Content -LiteralPath $verCache -Raw -ErrorAction SilentlyContinue)
+  $latest = Read-FileRaw $verCache
   if ($latest) { $latest = $latest.Trim() }
   if ($latest -and $latest -ne "$ver") { $updateNote = "  |  v$latest มาแล้ว — พิมพ์: ccrm update" }
 }
@@ -311,7 +324,7 @@ switch ($tag) {
   'kimi' {
     $id = Split-Path -Leaf $spath
     try {
-      $state = Get-Content -LiteralPath (Join-Path $spath 'state.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+      $state = Read-FileRaw (Join-Path $spath 'state.json') | ConvertFrom-Json
       if ($state.workDir) { Set-Location -LiteralPath $state.workDir }
     } catch {}
     & kimi -r $id --yolo
@@ -320,8 +333,8 @@ switch ($tag) {
     $projDir = Split-Path -Parent (Split-Path -Parent $spath)
     $rootFile = Join-Path $projDir '.project_root'
     if (Test-Path $rootFile) {
-      $root = Get-Content -LiteralPath $rootFile -Raw -Encoding UTF8
-      $root = $root.Trim()
+      $root = Read-FileRaw $rootFile
+      if ($root) { $root = $root.Trim() }
       if ($root) { Set-Location -LiteralPath $root }
     }
     & gemini --session-file $spath -y
