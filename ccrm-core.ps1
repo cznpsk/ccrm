@@ -213,17 +213,45 @@ function Get-SessionRows([bool]$includeAll) {
 
   $items = @($items | Sort-Object Time -Descending)
 
+  # cache ชื่อ session ตาม path+mtime — ไฟล์ใหญ่หลักร้อย MB สแกนหา customTitle ครั้งเดียวพอ
+  $cacheFile = Join-Path $env:LOCALAPPDATA 'ccrm-labels.tsv'
+  $cache = @{}
+  foreach ($ln in (Read-FileLines $cacheFile)) {
+    $parts = $ln -split "`t", 3
+    if ($parts.Count -eq 3) { $cache[$parts[0] + '|' + $parts[1]] = $parts[2] }
+  }
+  # codex rename เขียนแค่ session_index.jsonl ไม่แตะไฟล์ session — ผูก key กับ mtime ของ index ด้วย
+  $codexIdx = Join-Path $HOME '.codex\session_index.jsonl'
+  $codexIdxEp = if (Test-Path $codexIdx) { (Get-Item $codexIdx).LastWriteTime.Ticks } else { 0 }
+  $newLines = New-Object System.Text.StringBuilder
+
   $rows = @()
   foreach ($item in $items) {
     $sz = Format-Size $item.Bytes
     $dt = $item.Time.ToString('dd/MM HH:mm')
-    switch ($item.Tag) {
-      'codex'  { $label = Get-CodexLabel $item.RefPath }
-      'kimi'   { $label = Get-KimiLabel $item.Path }
-      'gemini' { $label = Get-GeminiLabel $item.RefPath }
-      default  { $label = Get-ClaudeLabel $item.RefPath }
+    $ck = "$($item.Time.Ticks)"
+    if ($item.Tag -eq 'codex') { $ck = "$ck-$codexIdxEp" }
+    $key = $item.RefPath + '|' + $ck
+    if ($cache.ContainsKey($key)) {
+      $label = $cache[$key]
+    } else {
+      switch ($item.Tag) {
+        'codex'  { $label = Get-CodexLabel $item.RefPath }
+        'kimi'   { $label = Get-KimiLabel $item.Path }
+        'gemini' { $label = Get-GeminiLabel $item.RefPath }
+        default  { $label = Get-ClaudeLabel $item.RefPath }
+      }
+      $label = $label -replace "[`t`r`n]", ' '
+      [void]$newLines.AppendLine($item.RefPath + "`t" + $ck + "`t" + $label)
     }
     $rows += ($item.Path + "`t" + $item.Tag + "`t" + $dt + "`t" + $sz + "`t" + $label)
+  }
+  if ($newLines.Length -gt 0) {
+    try {
+      [System.IO.File]::AppendAllText($cacheFile, $newLines.ToString())
+      $all = Read-FileLines $cacheFile
+      if ($all.Count -gt 5000) { [System.IO.File]::WriteAllLines($cacheFile, $all[-2000..-1]) }
+    } catch {}
   }
   return $rows
 }
@@ -291,7 +319,7 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 12
+$ver = 13
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://raw.githubusercontent.com/cznpsk/ccrm/main/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue

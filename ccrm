@@ -10,7 +10,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=12
+ver=13
 raw="https://raw.githubusercontent.com/cznpsk/ccrm/main"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -86,17 +86,38 @@ _list() {
   files=$(printf '%s\n%s\n%s\n%s\n' "$claude_files" "$codex_files" "$kimi_files" "$gemini_files" | grep -v '^$')
   [[ -n "$files" ]] || return 0
 
+  # cache ชื่อ session ตาม path+mtime — ไฟล์ใหญ่หลักร้อย MB สแกนหา customTitle ครั้งเดียวพอ
+  local label_cache="$HOME/.cache/ccrm-labels.tsv"
+  mkdir -p "$HOME/.cache"; touch "$label_cache"
+  # codex rename เขียนแค่ session_index.jsonl ไม่แตะไฟล์ session — ผูก key กับ mtime ของ index ด้วย
+  local codex_idx_ep=""
+  [[ -f "$HOME/.codex/session_index.jsonl" ]] && codex_idx_ep=$(_mtime_epoch "$HOME/.codex/session_index.jsonl")
+
   while IFS= read -r f; do
+    [[ -e "$f" ]] || continue
     case "$f" in
       */.codex/*)     tag="codex "; out="$f" ;;
       */.kimi-code/*) tag="kimi  "; out="$(dirname "$f")" ;;
       */.gemini/*)    tag="gemini"; out="$f" ;;
       *)              tag="claude"; out="$f" ;;
     esac
+    ep=$(_mtime_epoch "$f")
+    ck="$ep"
+    [[ "$f" == */.codex/* ]] && ck="$ep-$codex_idx_ep"
+    lbl=$(grep -F "$f"$'\t'"$ck"$'\t' "$label_cache" | head -1 | cut -f3-)
+    if [[ -z "$lbl" ]]; then
+      lbl=$(label_of "$f" | tr '\t\n' '  ')
+      printf '%s\t%s\t%s\n' "$f" "$ck" "$lbl" >> "$label_cache"
+    fi
     sz=$(du -sh "$out" 2>/dev/null | cut -f1)
     dt=$(_mtime_fmt "$f")
-    printf '%s\t%s\t%s\t%s\t%7s\t%s\n' "$(_mtime_epoch "$f")" "$out" "$tag" "$dt" "$sz" "$(label_of "$f" | tr '\t\n' '  ')"
+    printf '%s\t%s\t%s\t%s\t%7s\t%s\n' "$ep" "$out" "$tag" "$dt" "$sz" "$lbl"
   done <<< "$files" | sort -rn | cut -f2-
+
+  # กัน cache โตไม่จำกัด
+  if [[ $(wc -l < "$label_cache") -gt 5000 ]]; then
+    tail -2000 "$label_cache" > "$label_cache.tmp" && mv "$label_cache.tmp" "$label_cache"
+  fi
 }
 
 if [[ "${1:-}" == "--list" ]]; then
