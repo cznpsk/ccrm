@@ -10,7 +10,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=13
+ver=14
 raw="https://raw.githubusercontent.com/cznpsk/ccrm/main"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -154,7 +154,7 @@ case "$tag" in
     ;;
   kimi)
     id=$(basename "$spath")
-    workdir=$(jq -r '.workDir // empty' "$spath/state.json" 2>/dev/null)
+    workdir=$(jq -r '.cwd // .workDir // empty' "$spath/state.json" 2>/dev/null)
     [[ -n "$workdir" ]] && cd "$workdir"
     exec kimi -r "$id" --yolo
     ;;

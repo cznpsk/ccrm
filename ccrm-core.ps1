@@ -319,7 +319,7 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 13
+$ver = 14
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://raw.githubusercontent.com/cznpsk/ccrm/main/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
@@ -360,7 +360,8 @@ switch ($tag) {
     $id = Split-Path -Leaf $spath
     try {
       $state = Read-FileRaw (Join-Path $spath 'state.json') | ConvertFrom-Json
-      if ($state.workDir) { Set-Location -LiteralPath $state.workDir }
+      $wd = if ($state.cwd) { $state.cwd } elseif ($state.workDir) { $state.workDir } else { $null }
+      if ($wd) { Set-Location -LiteralPath $wd }
     } catch {}
     & kimi -r $id --yolo
   }
