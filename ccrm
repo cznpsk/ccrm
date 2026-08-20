@@ -10,7 +10,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=14
+ver=15
 raw="https://raw.githubusercontent.com/cznpsk/ccrm/main"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -32,9 +32,11 @@ os="$(uname)"
 if [[ "$os" == "Darwin" ]]; then
   _mtime_epoch() { stat -f '%m' "$1"; }
   _mtime_fmt()   { stat -f '%Sm' -t '%d/%m %H:%M' "$1"; }
+  _size_bytes()  { stat -f '%z' "$1"; }
 else
   _mtime_epoch() { stat -c '%Y' "$1"; }
   _mtime_fmt()   { date -d "@$(stat -c '%Y' "$1")" '+%d/%m %H:%M'; }
+  _size_bytes()  { stat -c '%s' "$1"; }
 fi
 
 label_of() {
@@ -93,26 +95,44 @@ _list() {
   local codex_idx_ep=""
   [[ -f "$HOME/.codex/session_index.jsonl" ]] && codex_idx_ep=$(_mtime_epoch "$HOME/.codex/session_index.jsonl")
 
-  while IFS= read -r f; do
-    [[ -e "$f" ]] || continue
+  # sort ตาม mtime ก่อน (stat อย่างเดียว เร็ว) แล้วค่อยทยอยคำนวณ label — จะได้ stream ออกทีละแถวแบบเรียงแล้ว
+  local files_sorted
+  files_sorted=$(while IFS= read -r f; do
+    [[ -e "$f" ]] && printf '%s\t%s\n' "$(_mtime_epoch "$f")" "$f"
+  done <<< "$files" | sort -rn)
+
+  while IFS=$'\t' read -r ep f; do
+    [[ -n "$f" ]] || continue
     case "$f" in
       */.codex/*)     tag="codex "; out="$f" ;;
       */.kimi-code/*) tag="kimi  "; out="$(dirname "$f")" ;;
       */.gemini/*)    tag="gemini"; out="$f" ;;
       *)              tag="claude"; out="$f" ;;
     esac
-    ep=$(_mtime_epoch "$f")
-    ck="$ep"
-    [[ "$f" == */.codex/* ]] && ck="$ep-$codex_idx_ep"
+    case "$tag" in
+      claude) ck=$(_size_bytes "$f") ;;        # jsonl append-only — key ตาม size ไว้สแกนเฉพาะส่วนงอก
+      "codex ") ck="$ep-$codex_idx_ep" ;;
+      *) ck="$ep" ;;
+    esac
     lbl=$(grep -F "$f"$'\t'"$ck"$'\t' "$label_cache" | head -1 | cut -f3-)
     if [[ -z "$lbl" ]]; then
-      lbl=$(label_of "$f" | tr '\t\n' '  ')
+      if [[ "$tag" == "claude" ]]; then
+        # ไฟล์โตจากรอบก่อน — สแกนหา customTitle เฉพาะ byte ที่งอกใหม่ ไม่อ่านทั้งไฟล์ซ้ำ
+        prev=$(grep -F "$f"$'\t' "$label_cache" | tail -1)
+        prev_sz=$(printf '%s' "$prev" | cut -f2)
+        if [[ "$prev_sz" =~ ^[0-9]+$ ]] && [[ "$prev_sz" -lt "$ck" ]]; then
+          nt=$(tail -c "+$((prev_sz+1))" "$f" 2>/dev/null | grep -o '"customTitle":"[^"]*"' | tail -1 | sed 's/"customTitle":"//;s/"$//')
+          nt="${nt:0:70}"
+          lbl="${nt:-$(printf '%s' "$prev" | cut -f3-)}"
+        fi
+      fi
+      [[ -n "$lbl" ]] || lbl=$(label_of "$f" | tr '\t\n' '  ')
       printf '%s\t%s\t%s\n' "$f" "$ck" "$lbl" >> "$label_cache"
     fi
     sz=$(du -sh "$out" 2>/dev/null | cut -f1)
     dt=$(_mtime_fmt "$f")
-    printf '%s\t%s\t%s\t%s\t%7s\t%s\n' "$ep" "$out" "$tag" "$dt" "$sz" "$lbl"
-  done <<< "$files" | sort -rn | cut -f2-
+    printf '%s\t%s\t%s\t%7s\t%s\n' "$out" "$tag" "$dt" "$sz" "$lbl"
+  done <<< "$files_sorted"
 
   # กัน cache โตไม่จำกัด
   if [[ $(wc -l < "$label_cache") -gt 5000 ]]; then
@@ -125,14 +145,13 @@ if [[ "${1:-}" == "--list" ]]; then
   exit 0
 fi
 
-list=$(_list "${1:-}")
-[[ -n "$list" ]] || { echo "ไม่พบ session"; exit 0; }
-
-total=$(echo "$list" | wc -l | tr -d ' ')
 reload_cmd="$0 --list ${1:-}"
+hdr="Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Esc=ยกเลิก$update_note"
 
-picked=$(echo "$list" | fzf --multi --delimiter=$'\t' --with-nth=2.. \
-  --header="รวม $total sessions  |  Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Esc=ยกเลิก$update_note" \
+# stream เข้า fzf ตรงๆ — UI เปิดทันที รายการทยอยขึ้นระหว่างสแกน (|| true กัน SIGPIPE ตอนผู้ใช้เลือกก่อนสแกนจบ)
+picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t' --with-nth=2.. \
+  --header="กำลังโหลด...  |  $hdr" \
+  --bind "load:transform-header:echo \"รวม \$FZF_TOTAL_COUNT sessions  |  $hdr\"" \
   --preview 'f={1}; case "$f" in
     */.codex/*) head -c 500000 "$f" | jq -r "select(.type==\"response_item\" and .payload.role==\"user\") | .payload.content[]? | select(.type==\"input_text\") | .text | select(startswith(\"<\")|not)" 2>/dev/null ;;
     */.kimi-code/*) jq -r "select(.type==\"turn.prompt\" and .origin.kind==\"user\") | .input[]? | select(.type==\"text\") | .text" "$f/agents/main/wire.jsonl" 2>/dev/null ;;

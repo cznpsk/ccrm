@@ -169,6 +169,23 @@ function Get-GeminiLabel([string]$sPath) {
   return '(ว่าง)'
 }
 
+# หา customTitle เฉพาะช่วง byte ที่งอกใหม่ (jsonl append-only) — ไม่อ่านไฟล์ใหญ่ซ้ำทั้งไฟล์
+function Get-TailTitle([string]$p, [long]$from) {
+  try {
+    $fs = [System.IO.File]::OpenRead($p)
+    [void]$fs.Seek($from, [System.IO.SeekOrigin]::Begin)
+    $sr = New-Object System.IO.StreamReader($fs)
+    $txt = $sr.ReadToEnd()
+    $sr.Close()
+    $ms = [regex]::Matches($txt, '"customTitle":"([^"]*)"')
+    if ($ms.Count -gt 0) {
+      $v = $ms[$ms.Count - 1].Groups[1].Value
+      if ($v) { return $v.Substring(0, [Math]::Min(70, $v.Length)) }
+    }
+  } catch {}
+  return $null
+}
+
 function Get-SessionRows([bool]$includeAll) {
   $base = Join-Path $HOME '.claude\projects'
   $claudeFiles = @()
@@ -216,9 +233,14 @@ function Get-SessionRows([bool]$includeAll) {
   # cache ชื่อ session ตาม path+mtime — ไฟล์ใหญ่หลักร้อย MB สแกนหา customTitle ครั้งเดียวพอ
   $cacheFile = Join-Path $env:LOCALAPPDATA 'ccrm-labels.tsv'
   $cache = @{}
+  $byPath = @{}   # entry ล่าสุดต่อ path — ไว้ทำ incremental scan ของ claude
   foreach ($ln in (Read-FileLines $cacheFile)) {
     $parts = $ln -split "`t", 3
-    if ($parts.Count -eq 3) { $cache[$parts[0] + '|' + $parts[1]] = $parts[2] }
+    if ($parts.Count -eq 3) {
+      $cache[$parts[0] + '|' + $parts[1]] = $parts[2]
+      $n = 0L
+      if ([long]::TryParse($parts[1], [ref]$n)) { $byPath[$parts[0]] = @{ Size = $n; Label = $parts[2] } }
+    }
   }
   # codex rename เขียนแค่ session_index.jsonl ไม่แตะไฟล์ session — ผูก key กับ mtime ของ index ด้วย
   $codexIdx = Join-Path $HOME '.codex\session_index.jsonl'
@@ -231,15 +253,26 @@ function Get-SessionRows([bool]$includeAll) {
     $dt = $item.Time.ToString('dd/MM HH:mm')
     $ck = "$($item.Time.Ticks)"
     if ($item.Tag -eq 'codex') { $ck = "$ck-$codexIdxEp" }
+    if ($item.Tag -eq 'claude') { $ck = "$($item.Bytes)" }   # jsonl append-only — key ตาม size
     $key = $item.RefPath + '|' + $ck
     if ($cache.ContainsKey($key)) {
       $label = $cache[$key]
     } else {
-      switch ($item.Tag) {
-        'codex'  { $label = Get-CodexLabel $item.RefPath }
-        'kimi'   { $label = Get-KimiLabel $item.Path }
-        'gemini' { $label = Get-GeminiLabel $item.RefPath }
-        default  { $label = Get-ClaudeLabel $item.RefPath }
+      $label = $null
+      if ($item.Tag -eq 'claude' -and $byPath.ContainsKey($item.RefPath)) {
+        $prev = $byPath[$item.RefPath]
+        if ($prev.Size -lt $item.Bytes) {
+          $nt = Get-TailTitle $item.RefPath $prev.Size
+          $label = if ($nt) { $nt } else { $prev.Label }
+        }
+      }
+      if (-not $label) {
+        switch ($item.Tag) {
+          'codex'  { $label = Get-CodexLabel $item.RefPath }
+          'kimi'   { $label = Get-KimiLabel $item.Path }
+          'gemini' { $label = Get-GeminiLabel $item.RefPath }
+          default  { $label = Get-ClaudeLabel $item.RefPath }
+        }
       }
       $label = $label -replace "[`t`r`n]", ' '
       [void]$newLines.AppendLine($item.RefPath + "`t" + $ck + "`t" + $label)
@@ -319,7 +352,7 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 14
+$ver = 15
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://raw.githubusercontent.com/cznpsk/ccrm/main/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
