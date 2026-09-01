@@ -44,9 +44,8 @@ install.ps1 จะลง `fzf` ให้อัตโนมัติผ่าน 
 ## วิธีใช้
 
 ```
-ccrm       # Claude session เฉพาะ project ปัจจุบัน + Codex/Kimi/Gemini ทั้งหมด
-ccrm -a    # (mac/Linux) Claude ทุก project ด้วย
-ccrm -All  # (Windows) เหมือนกัน
+ccrm          # ทุก session ทุก project (Claude/Codex/Kimi/Gemini)
+ccrm update   # อัพเดทเป็นเวอร์ชันล่าสุด
 ```
 
 คีย์ในหน้าจอเลือก session:
@@ -57,6 +56,7 @@ ccrm -All  # (Windows) เหมือนกัน
 | ลูกศรขึ้นลง | เลื่อนเลือก |
 | Enter | resume session ที่เลือก |
 | Tab | เลือกจะลบ — กด Tab อีกครั้งบนบรรทัดเดิมเพื่อยืนยันลบ |
+| Ctrl-A | รีเฟรชลิสต์ |
 | Esc | ยกเลิก ไม่ทำอะไร |
 
 ## หมายเหตุ

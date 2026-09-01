@@ -1,6 +1,5 @@
 ﻿# ccrm — จัดการ sessions ของ Claude Code + Codex + Kimi + Gemini แบบ interactive (fzf) สำหรับ Windows PowerShell
-# ใช้: ccrm       -> Claude (project ปัจจุบัน) + Codex/Kimi/Gemini ทั้งหมด
-#      ccrm -All  -> Claude ทุก project + Codex/Kimi/Gemini ทั้งหมด
+# ใช้: ccrm -> Claude ทุก project + Codex/Kimi/Gemini ทั้งหมด
 # คีย์: Enter=resume, Tab=เลือกจะลบ, กด Tab อีกครั้งบนบรรทัดเดิม=ยืนยันลบ, Esc=ยกเลิก
 # หมายเหตุ gemini: --resume ของตัว CLI เองรับแค่ "latest"/index ผูกกับ project ปัจจุบัน
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
@@ -189,16 +188,8 @@ function Get-TailTitle([string]$p, [long]$from) {
 function Get-SessionRows([bool]$includeAll) {
   $base = Join-Path $HOME '.claude\projects'
   $claudeFiles = @()
-  if ($includeAll) {
-    if (Test-Path $base) {
-      $claudeFiles = @(Get-ChildItem -Path (Join-Path $base '*\*.jsonl') -File -ErrorAction SilentlyContinue)
-    }
-  } else {
-    $proj = ($PWD.Path -replace '[\\/:.]', '-')
-    $projDir = Join-Path $base $proj
-    if (Test-Path $projDir) {
-      $claudeFiles = @(Get-ChildItem -Path $projDir -Filter *.jsonl -File -ErrorAction SilentlyContinue)
-    }
+  if (Test-Path $base) {
+    $claudeFiles = @(Get-ChildItem -Path (Join-Path $base '*\*.jsonl') -File -ErrorAction SilentlyContinue)
   }
 
   $codexDirs = @((Join-Path $HOME '.codex\sessions'), (Join-Path $HOME '.codex\archived_sessions')) | Where-Object { Test-Path $_ }
@@ -352,7 +343,7 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 16
+$ver = 17
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://raw.githubusercontent.com/cznpsk/ccrm/main/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
@@ -365,13 +356,13 @@ if (Test-Path $verCache) {
 
 $scriptPath = $PSCommandPath
 $psBase = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' + $scriptPath + '"'
-$header = "รวม $($rows.Count) sessions  |  Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=ทุกโปรเจกต์  Esc=ยกเลิก$updateNote"
+$header = "รวม $($rows.Count) sessions  |  Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก$updateNote"
 $previewCmd = $psBase + ' -PreviewLine -Line "{r}"'
 $allFlag = if ($All) { ' -All' } else { '' }
 $tabBind = 'tab:transform:' + $psBase + ' -TabTransform -Sel {+1} -Cur {1}' + $allFlag
 
-$allBind = 'ctrl-a:reload(' + $psBase + ' -ListOnly -All)+change-header(รวมทุกโปรเจกต์  |  Enter=resume  Tab=เลือกลบ  Esc=ยกเลิก)'
-$picked = $rows | fzf --multi --delimiter "`t" --with-nth 2.. --header $header --preview $previewCmd --preview-window right:50%:wrap --bind $tabBind --bind $allBind
+$refreshBind = 'ctrl-a:reload(' + $psBase + ' -ListOnly)'
+$picked = $rows | fzf --multi --delimiter "`t" --with-nth 2.. --header $header --preview $previewCmd --preview-window right:50%:wrap --bind $tabBind --bind $refreshBind
 
 if (-not $picked) { exit 0 }
 

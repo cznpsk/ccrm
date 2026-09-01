@@ -52,4 +52,4 @@ for c in claude codex; do
 done
 
 echo ""
-echo "ติดตั้งเสร็จ v$(grep -m1 '^ver=' "$HOME/.local/bin/ccrm" | cut -d= -f2) — พิมพ์ ccrm เพื่อใช้งาน (ccrm -a ดูทุก project)"
+echo "ติดตั้งเสร็จ v$(grep -m1 '^ver=' "$HOME/.local/bin/ccrm" | cut -d= -f2) — พิมพ์ ccrm เพื่อใช้งาน"

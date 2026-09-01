@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # ccrm — จัดการ sessions ของ Claude Code + Codex + Kimi + Gemini แบบ interactive (fzf)
 # รองรับ macOS (bash/zsh) และ Linux/WSL
-# ใช้: ccrm      → Claude (project ปัจจุบัน) + Codex/Kimi/Gemini ทั้งหมด
-#      ccrm -a   → Claude ทุก project + Codex/Kimi/Gemini ทั้งหมด
+# ใช้: ccrm → Claude ทุก project + Codex/Kimi/Gemini ทั้งหมด
 # คีย์: Enter=resume session ที่เลือก
 #       Tab=เลือกจะลบ, กด Tab อีกครั้งบนบรรทัดเดิม=ยืนยันลบ
 #       Esc=ยกเลิก
@@ -10,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=16
+ver=17
 raw="https://raw.githubusercontent.com/cznpsk/ccrm/main"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -76,12 +75,7 @@ label_of() {
 
 _list() {
   local claude_files codex_files kimi_files gemini_files files
-  if [[ "${1:-}" == "-a" ]]; then
-    claude_files=$(find "$base" -mindepth 2 -maxdepth 2 -name '*.jsonl' -type f 2>/dev/null)
-  else
-    local proj="${PWD//[\/.]/-}"
-    claude_files=$(find "$base/$proj" -maxdepth 1 -name '*.jsonl' -type f 2>/dev/null)
-  fi
+  claude_files=$(find "$base" -mindepth 2 -maxdepth 2 -name '*.jsonl' -type f 2>/dev/null)
   codex_files=$(find "$HOME/.codex/sessions" "$HOME/.codex/archived_sessions" -name '*.jsonl' -type f 2>/dev/null)
   kimi_files=$(find "$HOME/.kimi-code/sessions" -mindepth 3 -maxdepth 3 -name 'state.json' -type f 2>/dev/null)
   gemini_files=$(find "$HOME/.gemini/tmp" -mindepth 2 -path '*/chats/*' -name '*.json' -type f 2>/dev/null)
@@ -146,7 +140,7 @@ if [[ "${1:-}" == "--list" ]]; then
 fi
 
 reload_cmd="$0 --list ${1:-}"
-hdr="Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=ทุกโปรเจกต์  Esc=ยกเลิก$update_note"
+hdr="Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก$update_note"
 
 # stream เข้า fzf ตรงๆ — UI เปิดทันที รายการทยอยขึ้นระหว่างสแกน (|| true กัน SIGPIPE ตอนผู้ใช้เลือกก่อนสแกนจบ)
 picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t' --with-nth=2.. \
@@ -159,7 +153,7 @@ picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t'
     *) head -c 300000 "$f" | jq -r "select(.type==\"user\" and (.isMeta!=true)) | .message.content | if type==\"string\" then . else ([.[]|select(.type==\"text\")|.text]|join(\" \")) end" 2>/dev/null ;;
   esac | grep -v "^<" | head -30' \
   --preview-window=right:50%:wrap \
-  --bind "ctrl-a:reload($0 --list -a)+change-header(รวมทุกโปรเจกต์  |  $hdr)" \
+  --bind "ctrl-a:reload($reload_cmd)" \
   --bind "tab:transform:if [ \"\$FZF_SELECT_COUNT\" -gt 0 ] && [ {+1} = {1} ]; then echo \"execute-silent(rm -rf {1})+reload($reload_cmd)+clear-selection\"; else echo 'clear-selection+toggle'; fi") || exit 0
 
 [[ -n "$picked" ]] || exit 0
