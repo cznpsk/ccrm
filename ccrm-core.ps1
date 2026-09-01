@@ -343,7 +343,7 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 17
+$ver = 18
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://raw.githubusercontent.com/cznpsk/ccrm/main/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
@@ -352,6 +352,17 @@ if (Test-Path $verCache) {
   $latest = Read-FileRaw $verCache
   if ($latest) { $latest = $latest.Trim() }
   if ($latest -and $latest -ne "$ver") { $updateNote = "  |  v$latest มาแล้ว — พิมพ์: ccrm update" }
+}
+
+# มีเวอร์ชันใหม่ — เตือน+ถามก่อนเปิด (Enter = อัพเดทแล้วเปิดใหม่, n = ข้าม)
+if ($updateNote) {
+  $ans = Read-Host "⬆ มีเวอร์ชันใหม่ v$latest (ตอนนี้ v$ver) — อัพเดทเลยไหม? [Y/n]"
+  if ($ans -notmatch '^[nN]') {
+    $u = 'https://raw.githubusercontent.com/cznpsk/ccrm/main/install.ps1?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds()
+    Invoke-Expression (Invoke-WebRequest -UseBasicParsing -Uri $u).Content
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $HOME 'bin\ccrm-core.ps1')
+    exit 0
+  }
 }
 
 $scriptPath = $PSCommandPath

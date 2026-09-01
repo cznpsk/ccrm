@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=17
+ver=18
 raw="https://raw.githubusercontent.com/cznpsk/ccrm/main"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -137,6 +137,17 @@ _list() {
 if [[ "${1:-}" == "--list" ]]; then
   _list "${2:-}"
   exit 0
+fi
+
+# มีเวอร์ชันใหม่ — เตือน+ถามก่อนเปิด (Enter/เงียบ 10 วิ = อัพเดทแล้วเปิดใหม่, n = ข้าม)
+if [[ -n "$update_note" ]]; then
+  printf '⬆ มีเวอร์ชันใหม่ v%s (ตอนนี้ v%s) — อัพเดทเลยไหม? [Y/n] ' "$latest" "$ver"
+  read -r -t 10 ans || ans=""
+  echo ""
+  if [[ ! "$ans" =~ ^[Nn] ]]; then
+    curl -fsSL "$raw/install.sh?ts=$(date +%s)" | bash
+    exec "$HOME/.local/bin/ccrm"
+  fi
 fi
 
 reload_cmd="$0 --list ${1:-}"
