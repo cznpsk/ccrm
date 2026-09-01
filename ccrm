@@ -9,11 +9,11 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=19
-raw="https://raw.githubusercontent.com/cznpsk/ccrm/main"
+ver=20
+raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
-  # ?ts= กัน CDN cache ของ raw.githubusercontent (แคช ~5 นาที)
+  # ดึงจาก release asset — raw.githubusercontent แคชค้าง 5 นาทีแม้ใส่ ?ts
   exec bash -c "curl -fsSL '$raw/install.sh?ts=$(date +%s)' | bash"
 fi
 

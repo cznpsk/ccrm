@@ -3,7 +3,7 @@
 set -euo pipefail
 
 os="$(uname)"
-raw="https://raw.githubusercontent.com/cznpsk/ccrm/main"
+raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-/nonexistent}")" 2>/dev/null && pwd || true)"
 
 install_dep() {

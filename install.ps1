@@ -1,7 +1,7 @@
 ﻿# ติดตั้ง ccrm สำหรับ Windows PowerShell
 $ErrorActionPreference = 'Stop'
 
-$raw = 'https://raw.githubusercontent.com/cznpsk/ccrm/main'
+$raw = 'https://github.com/cznpsk/ccrm/releases/latest/download'
 $dir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $null }
 $binDir = Join-Path $HOME 'bin'
 New-Item -ItemType Directory -Force -Path $binDir | Out-Null

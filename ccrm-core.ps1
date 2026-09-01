@@ -21,7 +21,7 @@ try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 # กันกรณี ccrm.cmd เวอร์ชันเก่าส่ง "update" ทะลุมาเป็น positional arg
 if ($Line -eq 'update') {
-  $u = 'https://raw.githubusercontent.com/cznpsk/ccrm/main/install.ps1?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds()
+  $u = 'https://github.com/cznpsk/ccrm/releases/latest/download/install.ps1?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds()
   Invoke-Expression (Invoke-WebRequest -UseBasicParsing -Uri $u).Content
   exit 0
 }
@@ -343,10 +343,10 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 19
+$ver = 20
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
-Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://raw.githubusercontent.com/cznpsk/ccrm/main/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
+Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://github.com/cznpsk/ccrm/releases/latest/download/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
 $updateNote = ''
 if (Test-Path $verCache) {
   $latest = Read-FileRaw $verCache
@@ -359,7 +359,7 @@ if (Test-Path $verCache) {
 if ($updateNote) {
   $choice = @("อัพเดทเป็น v$latest เลย", "ข้ามไปก่อน (ใช้ v$ver ต่อ)") | fzf --header "⬆ มีเวอร์ชันใหม่ของ ccrm" --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> '
   if ($choice -like 'อัพเดท*') {
-    $u = 'https://raw.githubusercontent.com/cznpsk/ccrm/main/install.ps1?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds()
+    $u = 'https://github.com/cznpsk/ccrm/releases/latest/download/install.ps1?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds()
     Invoke-Expression (Invoke-WebRequest -UseBasicParsing -Uri $u).Content
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $HOME 'bin\ccrm-core.ps1')
     exit 0

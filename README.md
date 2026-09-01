@@ -11,7 +11,7 @@
 ### macOS / Linux (WSL)
 
 ```
-curl -fsSL https://raw.githubusercontent.com/cznpsk/ccrm/main/install.sh | bash
+curl -fsSL https://github.com/cznpsk/ccrm/releases/latest/download/install.sh | bash
 ```
 
 ปิด terminal แล้วเปิดใหม่ (ครั้งแรกเท่านั้น PATH ถึงจะอัปเดต) พิมพ์ `ccrm`
@@ -21,7 +21,7 @@ install.sh จะลง `fzf` และ `jq` ให้อัตโนมัต�
 ### Windows (PowerShell)
 
 ```
-irm https://raw.githubusercontent.com/cznpsk/ccrm/main/install.ps1 | iex
+irm https://github.com/cznpsk/ccrm/releases/latest/download/install.ps1 | iex
 ```
 
 ปิด terminal แล้วเปิดใหม่ (ครั้งแรกเท่านั้น) พิมพ์ `ccrm`
