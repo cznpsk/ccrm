@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=18
+ver=19
 raw="https://raw.githubusercontent.com/cznpsk/ccrm/main"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -23,7 +23,7 @@ mkdir -p "$HOME/.cache"
 ( curl -fsSL --max-time 3 "$raw/VERSION?ts=$(date +%s)" -o "$ver_cache.tmp" 2>/dev/null && mv "$ver_cache.tmp" "$ver_cache" ) &
 latest=$(cat "$ver_cache" 2>/dev/null | tr -d '[:space:]')
 update_note=""
-[[ -n "$latest" && "$latest" != "$ver" ]] && update_note="  |  ⬆ v$latest มาแล้ว — พิมพ์: ccrm update"
+[[ "$latest" =~ ^[0-9]+$ ]] && (( latest > ver )) && update_note="  |  ⬆ v$latest มาแล้ว"
 
 base="$HOME/.claude/projects"
 os="$(uname)"
@@ -139,12 +139,11 @@ if [[ "${1:-}" == "--list" ]]; then
   exit 0
 fi
 
-# มีเวอร์ชันใหม่ — เตือน+ถามก่อนเปิด (Enter/เงียบ 10 วิ = อัพเดทแล้วเปิดใหม่, n = ข้าม)
+# มีเวอร์ชันใหม่ — เมนูเลือกก่อนเปิด (ลูกศรขึ้นลง + Enter, Esc = ข้าม)
 if [[ -n "$update_note" ]]; then
-  printf '⬆ มีเวอร์ชันใหม่ v%s (ตอนนี้ v%s) — อัพเดทเลยไหม? [Y/n] ' "$latest" "$ver"
-  read -r -t 10 ans || ans=""
-  echo ""
-  if [[ ! "$ans" =~ ^[Nn] ]]; then
+  choice=$(printf 'อัพเดทเป็น v%s เลย\nข้ามไปก่อน (ใช้ v%s ต่อ)\n' "$latest" "$ver" \
+    | fzf --header="⬆ มีเวอร์ชันใหม่ของ ccrm" --no-multi --reverse --no-info --height=~6 --prompt='เลือก> ')
+  if [[ "$choice" == อัพเดท* ]]; then
     curl -fsSL "$raw/install.sh?ts=$(date +%s)" | bash
     exec "$HOME/.local/bin/ccrm"
   fi
