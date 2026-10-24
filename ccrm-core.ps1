@@ -724,7 +724,7 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 22
+$ver = 23
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://github.com/cznpsk/ccrm/releases/latest/download/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue

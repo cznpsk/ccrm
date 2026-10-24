@@ -50,6 +50,11 @@ foreach ($c in 'claude', 'codex') {
   }
 }
 
+if (-not (Test-Path (Join-Path $env:LOCALAPPDATA 'ccrm\vault.hc'))) {
+  Write-Host ''
+  Write-Host 'ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep — พิมพ์ ccrm lock-setup'
+}
+
 $verLine = Select-String -LiteralPath (Join-Path $binDir 'ccrm-core.ps1') -Pattern '^\$ver = (\d+)' | Select-Object -First 1
 $installedVer = if ($verLine) { $verLine.Matches[0].Groups[1].Value } else { '?' }
 Write-Host ''

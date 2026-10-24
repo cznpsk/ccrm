@@ -59,7 +59,7 @@ ccrm update   # อัพเดทเป็นเวอร์ชันล่า�
 | Ctrl-A | รีเฟรชลิสต์ |
 | Esc | ยกเลิก ไม่ทำอะไร |
 
-## ล็อก/เข้ารหัส session (macOS)
+## ล็อก/เข้ารหัส session (macOS + Windows)
 
 เก็บ session + login ของ Claude, Codex, Kimi, Gemini ไว้ในดิสก์อิมเมจเข้ารหัส AES-256 ล็อกแล้วอ่านไม่ได้ถ้าไม่มีรหัส
 
@@ -78,7 +78,9 @@ ccrm lock-cleanup  # ลบข้อมูลเดิมแบบไม่เ�
 - ตอนล็อก `~/.claude` เป็นโฟลเดอร์ว่างที่เขียนไม่ได้ เปิด `claude` ตรงๆ จะ error — ปลดล็อกก่อน
 - `kimi` ติดตั้งอยู่ใน `~/.kimi-code/bin` เลยใช้ไม่ได้ตอนล็อก (ปกติ)
 - ล็อกอัตโนมัติใช้ `sleepwatcher` (ติดตั้งผ่าน Homebrew ให้เอง)
-- Windows: กำลังทำ (ใช้ VeraCrypt)
+- **Windows** ใช้คำสั่งเดียวกันทั้งหมด — `lock-setup` ติดตั้ง VeraCrypt ให้เอง (ดาวน์โหลด MSI จากผู้ผลิต ตรวจลายเซ็น IDRIX, มีหน้าต่างขอสิทธิ์ admin ครั้งเดียว รองรับ ARM64) แล้วสร้างคอนเทนเนอร์ AES ที่ `%LOCALAPPDATA%\ccrm\vault.hc` (ไฟล์โตตามข้อมูลจริง) mount เป็นไดรฟ์ + junction `~\.claude` `~\.codex` `~\.kimi-code` `~\.gemini` เข้าไป
+- Windows ตั้ง `CLAUDE_CONFIG_DIR` ให้ `.claude.json` ไปอยู่ในวอลต์ — เปิด terminal ใหม่หลัง setup
+- Windows ล็อกอัตโนมัติตอน sleep ผ่าน Task Scheduler (`ccrm-sleeplock`)
 
 ## หมายเหตุ
 
