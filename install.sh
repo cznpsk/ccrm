@@ -51,5 +51,10 @@ for c in claude codex; do
   fi
 done
 
+if [[ "$os" == "Darwin" && ! -d "$HOME/Library/Application Support/.ws.sparsebundle" ]]; then
+  echo ""
+  echo "ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep — พิมพ์ ccrm lock-setup"
+fi
+
 echo ""
 echo "ติดตั้งเสร็จ v$(grep -m1 '^ver=' "$HOME/.local/bin/ccrm" | cut -d= -f2) — พิมพ์ ccrm เพื่อใช้งาน"

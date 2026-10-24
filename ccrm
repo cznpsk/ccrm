@@ -9,13 +9,364 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=20
+ver=21
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
   # ดึงจาก release asset — raw.githubusercontent แคชค้าง 5 นาทีแม้ใส่ ?ts
   exec bash -c "curl -fsSL '$raw/install.sh?ts=$(date +%s)' | bash"
 fi
+
+# ---------- vault: เข้ารหัส session ทุกค่าย (macOS) ----------
+# ดิสก์อิมเมจ AES-256 mount ทับ ~/.claude ตรงๆ — ค่ายอื่นเป็น symlink ชี้เข้าไปข้างใน
+# ล็อกแล้ว ~/.claude เป็นโฟลเดอร์ว่าง chmod 000 — เปิด CLI ตรงๆ ตอนล็อกจะเขียนไฟล์ไม่ได้ (กัน plaintext หลุดไปซ้อนใต้ mount)
+vault_img="$HOME/Library/Application Support/.ws.sparsebundle"
+vault_mp="$HOME/.claude"
+# ชื่อใน HOME : ชื่อในวอลต์
+vault_links=".codex:codex-data .kimi-code:kimi-data .gemini:gemini-data .claude.json:claude.json"
+sleep_plist="$HOME/Library/LaunchAgents/com.cznpsk.ccrm-sleeplock.plist"
+# ไฟล์ชั่วคราวของ Claude (task output ฯลฯ) ลบตอนล็อก — ไม่อิง HOME เลยเปิดให้ override ตอนเทสต์
+claude_tmp="${CCRM_CLAUDE_TMP:-/private/tmp/claude-$(id -u)}"
+
+_is_mac() { [[ "$(uname)" == "Darwin" ]]; }
+vault_configured() { _is_mac && [[ -d "$vault_img" ]]; }
+vault_mounted() { mount | grep -qF " on $vault_mp ("; }
+
+_notify() {
+  echo "$1"
+  [[ -n "${auto:-}" ]] && osascript -e "display notification \"$1\" with title \"ccrm\"" >/dev/null 2>&1
+  return 0
+}
+
+# จำนวนไฟล์ + ไบต์รวม ไว้เทียบหลัง copy ว่าครบ
+_tree_sig() { find "$1" -type f -print0 2>/dev/null | xargs -0 stat -f %z 2>/dev/null | awk '{n++; s+=$1} END {print n+0, s+0}'; }
+
+# CLI ที่เปิดอยู่ — ห้ามย้ายไฟล์ระหว่างมันเขียน
+_ai_running() {
+  { pgrep -x claude; pgrep -x codex; pgrep -x kimi; pgrep -x gemini; pgrep -f '(^|/)(codex|gemini|kimi)( |$)'; } 2>/dev/null | sort -u | grep -v "^$$\$"
+}
+
+# process ที่ถือไฟล์ในวอลต์อยู่ (detach ไม่ออกเพราะตัวพวกนี้)
+_vault_busy() { lsof -t +f -- "$vault_mp" 2>/dev/null | sort -u | grep -v "^$$\$"; }
+
+_proc_list() { local p; for p in $1; do ps -o pid=,comm= -p "$p" 2>/dev/null; done; }
+
+_is_ai_proc() {
+  local c a
+  c=$(basename "$(ps -o comm= -p "$1" 2>/dev/null)")
+  a=$(ps -o args= -p "$1" 2>/dev/null)
+  [[ "$c" =~ ^(claude|codex|kimi|gemini)$ ]] || [[ "$a" =~ (^|/)(codex|gemini|kimi)( |$) ]]
+}
+
+_read_pw() {
+  local p
+  printf '%s' "$1" > /dev/tty
+  IFS= read -rs p < /dev/tty
+  printf '\n' > /dev/tty
+  printf '%s' "$p"
+}
+
+# mount อิมเมจที่ $1 — ถามรหัสใน terminal เอง (-stdinpass ไม่ผ่าน argv และไม่ลง Keychain)
+_vault_attach() {
+  local mp="$1" pw="${2:-}" i
+  for i in 1 2 3; do
+    [[ -n "$pw" ]] || pw=$(_read_pw "🔒 รหัสผ่านวอลต์: ")
+    [[ -n "$pw" ]] || return 1
+    if printf '%s\0' "$pw" | hdiutil attach "$vault_img" -stdinpass -mountpoint "$mp" -nobrowse -quiet 2>/dev/null; then
+      return 0
+    fi
+    echo "รหัสไม่ถูก ลองใหม่ ($i/3)"
+    pw=""
+  done
+  return 1
+}
+
+# ย้าย $1 (ไฟล์/โฟลเดอร์จริงใน HOME) เข้าวอลต์ที่ $2 — copy → เทียบ → ของเดิมย้ายไปที่สำรอง ไม่ลบ
+_vault_adopt() {
+  local src="$1" dst="$2" s1 s2 bk
+  ditto "$src" "$dst" || { echo "  ✗ copy $src ไม่สำเร็จ ไม่แตะของเดิม"; rm -rf "$dst"; return 1; }
+  s1=$(_tree_sig "$src"); s2=$(_tree_sig "$dst")
+  if [[ "$s1" != "$s2" ]]; then
+    echo "  ✗ $src copy ไม่ครบ ($s1 ≠ $s2) ไม่แตะของเดิม"
+    rm -rf "$dst"
+    return 1
+  fi
+  bk="$HOME/.ccrm-plain-backup"
+  mkdir -p "$bk"; chmod 700 "$bk"
+  mv "$src" "$bk/$(basename "$src").$(date +%Y%m%d-%H%M%S)"
+  echo "  ✓ ย้าย ~/$(basename "$src") เข้าวอลต์แล้ว (${s1%% *} ไฟล์)"
+}
+
+# ให้ทุกค่ายชี้เข้าวอลต์ — adopt=1 ย้ายของที่ยังอยู่ข้างนอกเข้ามาด้วย (ตอน setup)
+# ไม่ adopt = แค่ซ่อม symlink (เช่น CLI เขียน .claude.json ใหม่ทับ symlink)
+_vault_links() {
+  local adopt="${1:-}" pair name inner src dst
+  for pair in $vault_links; do
+    name="${pair%%:*}"; inner="${pair#*:}"
+    src="$HOME/$name"; dst="$vault_mp/$inner"
+    if [[ -L "$src" ]]; then
+      [[ "$(readlink "$src")" == "$dst" ]] && continue
+      echo "  ! ~/$name เป็น symlink ไปที่อื่น ($(readlink "$src")) ข้ามไป"
+      continue
+    fi
+    if [[ -e "$src" ]]; then
+      if [[ -e "$dst" ]]; then
+        if [[ -f "$src" && -f "$dst" ]]; then
+          # CLI เขียนไฟล์ใหม่ทับ symlink — ตัวข้างนอกใหม่กว่า เก็บเข้าวอลต์
+          cp -p "$src" "$dst" && rm -f "$src"
+        else
+          echo "  ! มีทั้ง ~/$name และในวอลต์ ไม่แตะ — รวมเองแล้วรัน ccrm lock-setup ใหม่"
+          continue
+        fi
+      elif [[ -n "$adopt" ]]; then
+        _vault_adopt "$src" "$dst" || continue
+      else
+        continue
+      fi
+    fi
+    [[ -e "$dst" ]] && ln -s "$dst" "$src"
+  done
+}
+
+_vault_seal() {
+  if ! vault_mounted && [[ -d "$vault_mp" ]] && [[ -z "$(ls -A "$vault_mp" 2>/dev/null)" ]]; then
+    chmod 000 "$vault_mp"
+  fi
+  rm -f "$HOME/.claude.json.backup"
+  rm -rf "$claude_tmp" 2>/dev/null
+  return 0
+}
+
+_vault_unlock() {
+  _is_mac || { echo "ล็อก/ปลดล็อกยังรองรับแค่ macOS"; return 1; }
+  vault_configured || { echo "ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup"; return 1; }
+  if vault_mounted; then
+    _vault_links
+    echo "🔓 ปลดล็อกอยู่แล้ว"
+    return 0
+  fi
+  mkdir -p "$vault_mp"; chmod 700 "$vault_mp"
+  if [[ -n "$(ls -A "$vault_mp" 2>/dev/null)" ]]; then
+    # มีอะไรเขียนลง mountpoint ตอนล็อก — mount ทับจะซ่อนมันไว้ ให้ผู้ใช้ตัดสินเอง
+    chmod 000 "$vault_mp" 2>/dev/null
+    echo "⚠ ~/.claude ไม่ว่าง (มีไฟล์ถูกสร้างตอนล็อกอยู่) — ย้ายออกก่อนแล้วปลดล็อกใหม่"
+    return 1
+  fi
+  if ! _vault_attach "$vault_mp"; then
+    chmod 000 "$vault_mp"
+    echo "ปลดล็อกไม่สำเร็จ"
+    return 1
+  fi
+  _vault_links
+  echo "🔓 Unlocked"
+}
+
+# auto=1 มาจาก sleep hook — ปิด AI CLI ให้เอง แต่ไม่ฆ่าอย่างอื่น ไม่ใช้ -force (กันอิมเมจพัง)
+_vault_lock() {
+  local auto="${1:-}" busy p left yn
+  _is_mac || { echo "ล็อก/ปลดล็อกยังรองรับแค่ macOS"; return 1; }
+  vault_configured || { echo "ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup"; return 1; }
+  cd / || true
+  if ! vault_mounted; then
+    _vault_seal
+    echo "🔒 ล็อกอยู่แล้ว"
+    return 0
+  fi
+  _vault_links
+  busy=$(_vault_busy)
+  if [[ -n "$busy" ]]; then
+    local ai="" other=""
+    for p in $busy; do
+      if _is_ai_proc "$p"; then ai="$ai $p"; else other="$other $p"; fi
+    done
+    if [[ -n "$ai" ]]; then
+      if [[ -z "$auto" ]]; then
+        echo "AI CLI ยังเปิดอยู่:"; _proc_list "$ai"
+        printf 'ปิดให้แล้วล็อกเลยไหม [y/N] '; read -r yn < /dev/tty
+        [[ "$yn" =~ ^[Yy] ]] || { echo "ยกเลิก — ยังไม่ล็อก"; return 1; }
+      fi
+      kill -TERM $ai 2>/dev/null
+      for p in 1 2 3 4 5 6; do
+        left=""; for p2 in $ai; do kill -0 "$p2" 2>/dev/null && left="$left $p2"; done
+        [[ -z "$left" ]] && break
+        sleep 0.5
+      done
+    fi
+  fi
+  if ! hdiutil detach "$vault_mp" -quiet 2>/dev/null; then
+    sleep 1
+    if ! hdiutil detach "$vault_mp" -quiet 2>/dev/null; then
+      busy=$(_vault_busy)
+      _notify "ยังล็อกไม่ได้ — มีโปรแกรมเปิดไฟล์ในวอลต์อยู่: $(_proc_list "$busy" | awk '{print $2}' | xargs -n1 basename 2>/dev/null | sort -u | tr '\n' ' ')"
+      [[ -z "$auto" ]] && echo "(terminal ที่ cd อยู่ใน ~/.claude ก็นับ — cd ออกหรือปิดก่อน)"
+      return 1
+    fi
+  fi
+  _vault_seal
+  echo "🔒 Locked"
+}
+
+_install_wrappers() {
+  local d="$HOME/.local/bin"
+  mkdir -p "$d"
+  printf '#!/bin/sh\nexec "$HOME/.local/bin/ccrm" lock "$@"\n' > "$d/claude-lock"
+  printf '#!/bin/sh\nexec "$HOME/.local/bin/ccrm" unlock "$@"\n' > "$d/claude-unlock"
+  chmod +x "$d/claude-lock" "$d/claude-unlock"
+  local rc
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
+    if [[ -f "$rc" ]] && grep -qE '^[[:space:]]*(alias claude-(un)?lock=|claude-(un)?lock\(\))' "$rc"; then
+      echo "  ! $rc มี alias/function claude-lock/claude-unlock เดิมอยู่ — มันจะบังคำสั่งใหม่ ลบหรือ comment ออกแล้วเปิด terminal ใหม่"
+    fi
+  done
+}
+
+# ล็อกอัตโนมัติตอนเครื่อง sleep (ปิดฝา) ผ่าน sleepwatcher + LaunchAgent ของเราเอง (ไม่แตะ ~/.sleep ของผู้ใช้)
+_sleep_hook() {
+  local mode="$1" sw
+  if [[ "$mode" == off ]]; then
+    launchctl bootout "gui/$(id -u)" "$sleep_plist" 2>/dev/null
+    rm -f "$sleep_plist"
+    echo "ปิดล็อกอัตโนมัติตอน sleep แล้ว"
+    return 0
+  fi
+  sw=$(command -v sleepwatcher || ls /opt/homebrew/sbin/sleepwatcher /usr/local/sbin/sleepwatcher 2>/dev/null | head -1)
+  if [[ -z "$sw" ]]; then
+    if command -v brew >/dev/null 2>&1; then
+      echo "ติดตั้ง sleepwatcher ..."
+      brew install sleepwatcher >/dev/null 2>&1
+      sw=$(ls /opt/homebrew/sbin/sleepwatcher /usr/local/sbin/sleepwatcher 2>/dev/null | head -1)
+    fi
+    [[ -n "$sw" ]] || { echo "  ! ติดตั้ง sleepwatcher ไม่ได้ (ต้องมี Homebrew) — ข้ามล็อกอัตโนมัติ"; return 1; }
+  fi
+  mkdir -p "$(dirname "$sleep_plist")"
+  cat > "$sleep_plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.cznpsk.ccrm-sleeplock</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$sw</string>
+    <string>-V</string>
+    <string>-s</string>
+    <string>'$HOME/.local/bin/ccrm' lock --auto</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+EOF
+  launchctl bootout "gui/$(id -u)" "$sleep_plist" 2>/dev/null
+  launchctl bootstrap "gui/$(id -u)" "$sleep_plist" 2>/dev/null
+  echo "  ✓ ล็อกอัตโนมัติตอนเครื่อง sleep (ปิดฝา) — AI CLI ที่เปิดค้างจะถูกปิดให้ก่อนล็อก"
+}
+
+_vault_status() {
+  if ! _is_mac; then echo "ล็อกยังรองรับแค่ macOS"; return 0; fi
+  if ! vault_configured; then echo "ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup"; return 0; fi
+  if vault_mounted; then echo "🔓 ปลดล็อกอยู่"; else echo "🔒 ล็อกอยู่"; fi
+  [[ -f "$sleep_plist" ]] && echo "ล็อกอัตโนมัติตอน sleep: เปิด" || echo "ล็อกอัตโนมัติตอน sleep: ปิด (ccrm lock-auto on)"
+  [[ -d "$HOME/.ccrm-plain-backup" ]] && echo "⚠ มีข้อมูลเดิมแบบไม่เข้ารหัสค้างที่ ~/.ccrm-plain-backup — ใช้งานได้ปกติแล้วสั่ง ccrm lock-cleanup"
+  return 0
+}
+
+_vault_setup() {
+  _is_mac || { echo "ตั้งค่าล็อกยังรองรับแค่ macOS (Windows กำลังทำ)"; return 1; }
+  if [[ -n "${CLAUDECODE:-}" ]]; then
+    echo "รันจาก terminal ปกติ — ห้ามรันจากใน Claude Code (มันเปิดไฟล์ที่ต้องย้ายอยู่)"; return 1
+  fi
+  local running; running=$(_ai_running)
+  if [[ -n "$running" ]]; then
+    echo "ปิด AI CLI ทุกตัวก่อน (claude/codex/kimi/gemini) แล้วรันใหม่:"; _proc_list "$running"; return 1
+  fi
+  local yn pw pw2
+  if vault_configured; then
+    echo "เจอวอลต์เดิมที่ $vault_img — ใช้ต่อ (ไม่สร้างใหม่)"
+    vault_mounted || _vault_unlock || return 1
+  else
+    if vault_mounted || { [[ -d "$vault_mp" && ! -w "$vault_mp" ]]; }; then
+      echo "~/.claude เป็น mount อื่นอยู่หรือเขียนไม่ได้ — ตั้งค่าไม่ได้"; return 1
+    fi
+    local need avail pair name
+    need=$(du -sk "$vault_mp" 2>/dev/null | cut -f1); need=${need:-0}
+    for pair in $vault_links; do
+      name="${pair%%:*}"
+      [[ -e "$HOME/$name" && ! -L "$HOME/$name" ]] && need=$(( need + $(du -sk "$HOME/$name" | cut -f1) ))
+    done
+    avail=$(df -k "$HOME" | awk 'NR==2 {print $4}')
+    echo "จะเข้ารหัส session ของ Claude/Codex/Kimi/Gemini ไว้ในดิสก์อิมเมจ AES-256"
+    echo "  ข้อมูลที่ต้องย้าย: $(( need / 1024 )) MB · ที่ว่างดิสก์: $(( avail / 1024 )) MB"
+    if (( avail < need + 1048576 )); then
+      echo "ที่ว่างไม่พอ (ต้องมากกว่าข้อมูล + 1 GB)"; return 1
+    fi
+    echo ""
+    echo "⚠ ลืมรหัสผ่าน = ข้อมูล session ทั้งหมดหายถาวร กู้ไม่ได้ (ไม่มีใครช่วยได้)"
+    printf 'เริ่มเลยไหม [y/N] '; read -r yn < /dev/tty
+    [[ "$yn" =~ ^[Yy] ]] || { echo "ยกเลิก"; return 1; }
+    while :; do
+      pw=$(_read_pw "ตั้งรหัสผ่าน (อย่างน้อย 8 ตัว): ")
+      (( ${#pw} >= 8 )) || { echo "สั้นไป"; continue; }
+      pw2=$(_read_pw "พิมพ์ซ้ำอีกครั้ง: ")
+      [[ "$pw" == "$pw2" ]] && break
+      echo "ไม่ตรงกัน ลองใหม่"
+    done
+    mkdir -p "$(dirname "$vault_img")"
+    echo "สร้างวอลต์..."
+    printf '%s\0' "$pw" | hdiutil create -quiet -encryption AES-256 -stdinpass -type SPARSEBUNDLE \
+      -fs APFS -volname ccrm-vault -size 500g "$vault_img" || { echo "สร้างอิมเมจไม่สำเร็จ"; return 1; }
+    if [[ -d "$vault_mp" ]]; then
+      local tmp_mp="$HOME/.ccrm-vault-mnt"
+      mkdir -p "$tmp_mp"
+      _vault_attach "$tmp_mp" "$pw" || { echo "mount ไม่สำเร็จ ข้อมูลเดิมไม่ถูกแตะ"; return 1; }
+      echo "ย้าย ~/.claude ..."
+      ditto "$vault_mp" "$tmp_mp" || { hdiutil detach "$tmp_mp" -quiet; echo "copy ไม่สำเร็จ ข้อมูลเดิมไม่ถูกแตะ"; return 1; }
+      if [[ "$(_tree_sig "$vault_mp")" != "$(_tree_sig "$tmp_mp")" ]]; then
+        hdiutil detach "$tmp_mp" -quiet; echo "copy ไม่ครบ ข้อมูลเดิมไม่ถูกแตะ — รันใหม่ได้"; return 1
+      fi
+      hdiutil detach "$tmp_mp" -quiet; rmdir "$tmp_mp"
+      mkdir -p "$HOME/.ccrm-plain-backup"; chmod 700 "$HOME/.ccrm-plain-backup"
+      mv "$vault_mp" "$HOME/.ccrm-plain-backup/.claude.$(date +%Y%m%d-%H%M%S)"
+      echo "  ✓ ย้าย ~/.claude เข้าวอลต์แล้ว"
+    fi
+    mkdir -p "$vault_mp"; chmod 700 "$vault_mp"
+    _vault_attach "$vault_mp" "$pw" || { echo "mount ไม่สำเร็จ"; return 1; }
+  fi
+  _vault_links 1
+  # cache ชื่อ session (ข้อความแรกของแต่ละแชท) ต้องอยู่ในวอลต์ด้วย
+  mkdir -p "$vault_mp/.ccrm"
+  [[ -f "$HOME/.cache/ccrm-labels.tsv" ]] && mv "$HOME/.cache/ccrm-labels.tsv" "$vault_mp/.ccrm/labels.tsv"
+  _install_wrappers
+  _sleep_hook on
+  echo ""
+  echo "เสร็จแล้ว 🔓 ตอนนี้ปลดล็อกอยู่"
+  echo "  ล็อก: claude-lock (หรือ ccrm lock, Ctrl-L ใน ccrm) · ปลดล็อก: claude-unlock หรือแค่เปิด ccrm"
+  [[ -d "$HOME/.ccrm-plain-backup" ]] && echo "  ⚠ ข้อมูลเดิมแบบไม่เข้ารหัสยังอยู่ที่ ~/.ccrm-plain-backup — ลองใช้งานให้แน่ใจแล้วสั่ง ccrm lock-cleanup"
+  return 0
+}
+
+_vault_cleanup() {
+  local bk="$HOME/.ccrm-plain-backup" yn
+  [[ -d "$bk" ]] || { echo "ไม่มีข้อมูลสำรองค้าง"; return 0; }
+  vault_mounted || { echo "ปลดล็อกวอลต์ก่อน (ให้แน่ใจว่ารหัสใช้ได้) แล้วค่อยลบ"; return 1; }
+  du -sh "$bk"/* 2>/dev/null
+  printf 'ลบข้อมูลเดิมแบบไม่เข้ารหัสทั้งหมดนี้? (ในวอลต์ยังอยู่ครบ) [y/N] '; read -r yn < /dev/tty
+  [[ "$yn" =~ ^[Yy] ]] || { echo "ยกเลิก"; return 1; }
+  rm -rf "$bk" && echo "ลบแล้ว"
+}
+
+case "${1:-}" in
+  lock)        _vault_lock "$([[ "${2:-}" == --auto ]] && echo 1)"; exit $? ;;
+  unlock)      _vault_unlock; exit $? ;;
+  lock-setup)  _vault_setup; exit $? ;;
+  lock-status) _vault_status; exit $? ;;
+  lock-cleanup) _vault_cleanup; exit $? ;;
+  lock-auto)
+    if [[ "${2:-}" == off ]]; then _sleep_hook off; else _sleep_hook on; fi
+    exit $? ;;
+esac
 
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 ver_cache="$HOME/.cache/ccrm-latest"
@@ -83,8 +434,16 @@ _list() {
   [[ -n "$files" ]] || return 0
 
   # cache ชื่อ session ตาม path+mtime — ไฟล์ใหญ่หลักร้อย MB สแกนหา customTitle ครั้งเดียวพอ
+  # มีวอลต์ = cache อยู่ในวอลต์ด้วย (เก็บข้อความแรกของแต่ละแชท ห้ามหลุดออกมาข้างนอก)
   local label_cache="$HOME/.cache/ccrm-labels.tsv"
-  mkdir -p "$HOME/.cache"; touch "$label_cache"
+  if vault_configured; then
+    label_cache="$vault_mp/.ccrm/labels.tsv"
+    # cache เดิมข้างนอก — ย้ายเข้าวอลต์ (ไม่ต้องสแกนไฟล์ใหญ่ใหม่หมด)
+    if [[ ! -f "$label_cache" && -f "$HOME/.cache/ccrm-labels.tsv" ]]; then
+      mkdir -p "$(dirname "$label_cache")"; mv "$HOME/.cache/ccrm-labels.tsv" "$label_cache"
+    fi
+  fi
+  mkdir -p "$(dirname "$label_cache")"; touch "$label_cache"
   # codex rename เขียนแค่ session_index.jsonl ไม่แตะไฟล์ session — ผูก key กับ mtime ของ index ด้วย
   local codex_idx_ep=""
   [[ -f "$HOME/.codex/session_index.jsonl" ]] && codex_idx_ep=$(_mtime_epoch "$HOME/.codex/session_index.jsonl")
@@ -139,6 +498,24 @@ if [[ "${1:-}" == "--list" ]]; then
   exit 0
 fi
 
+# ล็อกอยู่ — ปลดก่อนค่อยโชว์ session (Enter ว่าง = ออก)
+lock_note=""; lock_bind=()
+if vault_configured; then
+  if ! vault_mounted; then
+    echo "🔒 session ถูกล็อกอยู่ (Enter ว่าง = ออก)"
+    _vault_unlock || exit 1
+  fi
+  lock_note="  🔓 Ctrl-L=ล็อก"
+  lock_bind=(--bind "ctrl-l:become('$0' lock)")
+elif _is_mac && [[ ! -f "$HOME/.cache/ccrm-lock-nag-off" ]]; then
+  choice=$(printf 'ตั้งค่าเลย (ccrm lock-setup)\nไว้ทีหลัง\nไม่ต้องถามอีก\n' \
+    | fzf --header="🔐 ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep" --no-multi --reverse --no-info --height=~6 --prompt='เลือก> ')
+  case "$choice" in
+    ตั้งค่า*) _vault_setup; exit $? ;;
+    ไม่ต้อง*) touch "$HOME/.cache/ccrm-lock-nag-off" ;;
+  esac
+fi
+
 # มีเวอร์ชันใหม่ — เมนูเลือกก่อนเปิด (ลูกศรขึ้นลง + Enter, Esc = ข้าม)
 if [[ -n "$update_note" ]]; then
   choice=$(printf 'อัพเดทเป็น v%s เลย\nข้ามไปก่อน (ใช้ v%s ต่อ)\n' "$latest" "$ver" \
@@ -150,7 +527,7 @@ if [[ -n "$update_note" ]]; then
 fi
 
 reload_cmd="$0 --list ${1:-}"
-hdr="Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก$update_note"
+hdr="Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก$lock_note$update_note"
 
 # stream เข้า fzf ตรงๆ — UI เปิดทันที รายการทยอยขึ้นระหว่างสแกน (|| true กัน SIGPIPE ตอนผู้ใช้เลือกก่อนสแกนจบ)
 picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t' --with-nth=2.. \
@@ -164,6 +541,7 @@ picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t'
   esac | grep -v "^<" | head -30' \
   --preview-window=right:50%:wrap \
   --bind "ctrl-a:reload($reload_cmd)" \
+  ${lock_bind[@]+"${lock_bind[@]}"} \
   --bind "tab:transform:if [ \"\$FZF_SELECT_COUNT\" -gt 0 ] && [ {+1} = {1} ]; then echo \"execute-silent(rm -rf {1})+reload($reload_cmd)+clear-selection\"; else echo 'clear-selection+toggle'; fi") || exit 0
 
 [[ -n "$picked" ]] || exit 0

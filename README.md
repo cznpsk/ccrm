@@ -59,6 +59,27 @@ ccrm update   # อัพเดทเป็นเวอร์ชันล่า�
 | Ctrl-A | รีเฟรชลิสต์ |
 | Esc | ยกเลิก ไม่ทำอะไร |
 
+## ล็อก/เข้ารหัส session (macOS)
+
+เก็บ session + login ของ Claude, Codex, Kimi, Gemini ไว้ในดิสก์อิมเมจเข้ารหัส AES-256 ล็อกแล้วอ่านไม่ได้ถ้าไม่มีรหัส
+
+```
+ccrm lock-setup    # ตั้งค่าครั้งแรก: ตั้งรหัสผ่าน → ย้ายข้อมูลเข้าวอลต์ → ล็อกอัตโนมัติตอน sleep
+ccrm lock          # ล็อก (หรือ claude-lock, หรือ Ctrl-L ในหน้า ccrm)
+ccrm unlock        # ปลดล็อก (หรือ claude-unlock, หรือแค่เปิด ccrm จะถามรหัสเอง)
+ccrm lock-status   # ดูสถานะ
+ccrm lock-auto off # ปิดล็อกอัตโนมัติตอน sleep (on = เปิด)
+ccrm lock-cleanup  # ลบข้อมูลเดิมแบบไม่เข้ารหัสหลังย้าย (ทำหลังลองใช้แล้วว่าปกติ)
+```
+
+- รัน `lock-setup` จาก terminal ปกติ และปิด claude/codex/kimi/gemini ให้หมดก่อน
+- **ลืมรหัสผ่าน = ข้อมูลหายถาวร** ไม่มีทางกู้
+- ตอนเครื่อง sleep (ปิดฝา) ccrm จะปิด AI CLI ที่เปิดค้างให้แล้วล็อก — terminal ที่ `cd` ค้างอยู่ใน `~/.claude` จะทำให้ล็อกไม่ได้ (ขึ้นแจ้งเตือน)
+- ตอนล็อก `~/.claude` เป็นโฟลเดอร์ว่างที่เขียนไม่ได้ เปิด `claude` ตรงๆ จะ error — ปลดล็อกก่อน
+- `kimi` ติดตั้งอยู่ใน `~/.kimi-code/bin` เลยใช้ไม่ได้ตอนล็อก (ปกติ)
+- ล็อกอัตโนมัติใช้ `sleepwatcher` (ติดตั้งผ่าน Homebrew ให้เอง)
+- Windows: กำลังทำ (ใช้ VeraCrypt)
+
 ## หมายเหตุ
 
 - **Gemini**: ตัว CLI เองไม่รองรับ resume ด้วย session id ตรงๆ (`--resume` รับแค่ "latest" หรือเลขลำดับ) ccrm เลยใช้วิธี `cd` เข้า project เดิมก่อนแล้วโหลดไฟล์ session ตรงๆ แทน — ถ้า resume แล้ว error ผิดปกติ ลองเช็คว่า `gemini` CLI login/ใช้งานได้ปกติก่อน
