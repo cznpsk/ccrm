@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=21
+ver=22
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -334,6 +334,18 @@ _vault_setup() {
     mkdir -p "$vault_mp"; chmod 700 "$vault_mp"
     _vault_attach "$vault_mp" "$pw" || { echo "mount ไม่สำเร็จ"; return 1; }
   fi
+  # วอลต์เดิมอาจเล็ก (เพดานตอนสร้าง) — เช็คที่ว่างในวอลต์ก่อนย้ายของเข้า ไม่ให้เต็มระหว่างใช้งาน
+  local pend=0 vfree pair name
+  for pair in $vault_links; do
+    name="${pair%%:*}"
+    [[ -e "$HOME/$name" && ! -L "$HOME/$name" ]] && pend=$(( pend + $(du -sk "$HOME/$name" | cut -f1) ))
+  done
+  vfree=$(df -k "$vault_mp" | awk 'NR==2 {print $4}')
+  if (( pend > 0 && vfree < pend + 524288 )); then
+    echo "ที่ว่างในวอลต์ไม่พอ: ต้องย้าย $(( pend / 1024 )) MB แต่วอลต์ว่าง $(( vfree / 1024 )) MB (ต้องเหลือเผื่อ 512 MB)"
+    echo "ขยายอิมเมจก่อน: hdiutil resize -size <ขนาดใหม่> \"$vault_img\" (ต้องล็อกก่อน) แล้วรัน ccrm lock-setup ใหม่"
+    return 1
+  fi
   _vault_links 1
   # cache ชื่อ session (ข้อความแรกของแต่ละแชท) ต้องอยู่ในวอลต์ด้วย
   mkdir -p "$vault_mp/.ccrm"
@@ -506,7 +518,8 @@ if vault_configured; then
     _vault_unlock || exit 1
   fi
   lock_note="  🔓 Ctrl-L=ล็อก"
-  lock_bind=(--bind "ctrl-l:become('$0' lock)")
+  # execute+abort ไม่ใช่ become — become จะเอา output ของ lock ไปเป็นผลลัพธ์ของ fzf แล้วไป resume มั่ว
+  lock_bind=(--bind "ctrl-l:execute('$0' lock)+abort")
 elif _is_mac && [[ ! -f "$HOME/.cache/ccrm-lock-nag-off" ]]; then
   choice=$(printf 'ตั้งค่าเลย (ccrm lock-setup)\nไว้ทีหลัง\nไม่ต้องถามอีก\n' \
     | fzf --header="🔐 ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep" --no-multi --reverse --no-info --height=~6 --prompt='เลือก> ')
