@@ -19,6 +19,8 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+# progress bar ของ Invoke-WebRequest ใน PS 5.1 ทำให้โหลดไฟล์ใหญ่ช้าเป็นสิบเท่า
+$ProgressPreference = 'SilentlyContinue'
 
 # กันกรณี ccrm.cmd เวอร์ชันเก่าส่ง "update" ทะลุมาเป็น positional arg
 if ($Line -eq 'update') {
@@ -513,12 +515,48 @@ function Show-VaultStatus {
   if (Test-Path -LiteralPath $plainBackup) { Write-Host '⚠ มีข้อมูลเดิมแบบไม่เข้ารหัสค้างที่ ~\.ccrm-plain-backup — ใช้งานได้ปกติแล้วสั่ง ccrm lock-cleanup' }
 }
 
+# ติดตั้ง VeraCrypt จาก MSI ของผู้ผลิตตรงๆ — winget มีแต่ x64 (ลงบน Windows ARM ไม่ได้ 1603)
 function Install-VeraCrypt {
   if (Get-VcExe 'VeraCrypt.exe') { return $true }
-  if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Write-Host 'ไม่มี winget — ติดตั้ง VeraCrypt เองจาก https://veracrypt.io แล้วรันใหม่'; return $false }
-  Write-Host 'ติดตั้ง VeraCrypt (จะมีหน้าต่างขอสิทธิ์ admin ให้กด Yes) ...'
-  & winget install -e --id IDRIX.VeraCrypt --silent --accept-package-agreements --accept-source-agreements | Out-Null
-  if (-not (Get-VcExe 'VeraCrypt.exe')) { Write-Host 'ติดตั้ง VeraCrypt ไม่สำเร็จ'; return $false }
+  $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+  $a = if ($arch -eq 'ARM64') { 'arm64' } else { 'x64' }
+  $vcVer = '1.26.29'
+  # เวอร์ชันล่าสุดดูจาก manifest ของ winget (ถ้ามี)
+  try {
+    $w = & winget show -e --id IDRIX.VeraCrypt --disable-interactivity 2>$null | Out-String
+    if ($w -match 'VeraCrypt_Setup_x64_([\d.]+)\.msi') { $vcVer = $matches[1] }
+  } catch {}
+  # [string] — Join-Path คืน PSObject ห่อ string ส่งเข้า COM แล้วได้ type mismatch
+  $msi = [string](Join-Path $env:TEMP "VeraCrypt_Setup_${a}_$vcVer.msi")
+  Write-Host "ดาวน์โหลด VeraCrypt $vcVer ($a) ..."
+  try {
+    Invoke-WebRequest -UseBasicParsing -Uri "https://launchpad.net/veracrypt/trunk/$vcVer/+download/VeraCrypt_Setup_${a}_$vcVer.msi" -OutFile $msi
+  } catch { Write-Host "ดาวน์โหลดไม่สำเร็จ: $($_.Exception.Message)"; return $false }
+  # ไฟล์ต้องเซ็นโดย IDRIX จริง — กันโดนสลับไฟล์ระหว่างทาง
+  $sig = Get-AuthenticodeSignature -FilePath $msi
+  if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'CN=IDRIX') {
+    Write-Host "ลายเซ็น VeraCrypt ไม่ถูกต้อง ($($sig.Status)) — ยกเลิกการติดตั้ง"
+    Remove-Item -LiteralPath $msi -Force -ErrorAction SilentlyContinue
+    return $false
+  }
+  if ($a -eq 'arm64') {
+    # MSI arm64 ของ VeraCrypt ใส่ Template เป็น "arm64" ตัวเล็ก msiexec เลยปฏิเสธ (1633) — แก้เป็น "Arm64" หลังตรวจลายเซ็นแล้ว
+    $inst = New-Object -ComObject WindowsInstaller.Installer
+    $si = $inst.GetType().InvokeMember('SummaryInformation', 'GetProperty', $null, $inst, @($msi, 1))
+    $si.GetType().InvokeMember('Property', 'SetProperty', $null, $si, @(7, 'Arm64;1033'))
+    $si.GetType().InvokeMember('Persist', 'InvokeMethod', $null, $si, $null)
+    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($si)
+  }
+  # /passive = มีแถบความคืบหน้าแต่ไม่มี dialog ค้างรอกด (error ดูจาก exit code แทน)
+  $msiArgs = "/i `"$msi`" /passive ACCEPTLICENSE=YES /norestart"
+  $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  Write-Host 'ติดตั้ง VeraCrypt (มีหน้าต่างขอสิทธิ์ admin ให้กด Yes) ...'
+  try {
+    if ($isAdmin) { $p = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru }
+    else { $p = Start-Process msiexec.exe -ArgumentList $msiArgs -Verb RunAs -Wait -PassThru }
+  } catch { Write-Host 'ไม่ได้กดอนุญาต — ยกเลิก'; return $false }
+  Remove-Item -LiteralPath $msi -Force -ErrorAction SilentlyContinue
+  if (-not (Get-VcExe 'VeraCrypt.exe')) { Write-Host "ติดตั้ง VeraCrypt ไม่สำเร็จ (exit $($p.ExitCode))"; return $false }
   return $true
 }
 
@@ -545,7 +583,7 @@ function Invoke-VaultSetup {
     }
     $drive = New-Object System.IO.DriveInfo ($env:LOCALAPPDATA.Substring(0, 1))
     Write-Host 'จะเข้ารหัส session ของ Claude/Codex/Kimi/Gemini ไว้ในคอนเทนเนอร์ VeraCrypt (AES)'
-    Write-Host ("  ข้อมูลที่ต้องย้าย: {0} · ที่ว่างดิสก์: {1}" -f (Format-Size $need), (Format-Size $drive.AvailableFreeSpace))
+    Write-Host ("  ข้อมูลที่ต้องย้าย: {0}B · ที่ว่างดิสก์: {1}B" -f (Format-Size $need), (Format-Size $drive.AvailableFreeSpace))
     if ($drive.AvailableFreeSpace -lt ($need + 1GB)) { Write-Host 'ที่ว่างไม่พอ (ต้องมากกว่าข้อมูล + 1 GB)'; return }
     Write-Host ''
     Write-Host '⚠ ลืมรหัสผ่าน = ข้อมูล session ทั้งหมดหายถาวร กู้ไม่ได้ (ไม่มีใครช่วยได้)'
@@ -559,11 +597,11 @@ function Invoke-VaultSetup {
       Write-Host 'ไม่ตรงกัน ลองใหม่'
     }
     New-Item -ItemType Directory -Force -Path $vaultDir | Out-Null
-    # dynamic = ไฟล์โตตามข้อมูลจริง ขนาดที่ตั้งเป็นแค่เพดาน
-    $cap = [Math]::Max(20, [Math]::Ceiling($need / 1GB) * 3)
+    # dynamic + quick = sparse file โตตามข้อมูลจริง ขนาดที่ตั้งเป็นแค่เพดาน (ไม่มี /quick จะจองเต็มก้อน)
+    $cap = [Math]::Max(100, [Math]::Ceiling($need / 1GB) * 3)
     Write-Host "สร้างวอลต์ (เพดาน ${cap}G) ..."
     $fmt = Get-VcExe 'VeraCrypt Format.exe'
-    & $fmt /create $vaultFile /size "${cap}G" /password $pw /encryption AES /hash sha512 /filesystem NTFS /dynamic /silent /force | Out-Null
+    & $fmt /create $vaultFile /size "${cap}G" /password $pw /encryption AES /hash sha512 /filesystem NTFS /dynamic /quick /silent /force | Out-Null
     if (-not (Test-Path -LiteralPath $vaultFile)) { Write-Host 'สร้างคอนเทนเนอร์ไม่สำเร็จ ข้อมูลเดิมไม่ถูกแตะ'; return }
     $letter = Get-FreeLetter
     if (-not (Invoke-VcMount $letter $pw)) { Write-Host 'mount ไม่สำเร็จ ข้อมูลเดิมไม่ถูกแตะ'; return }
@@ -719,7 +757,11 @@ $refreshBind = 'ctrl-a:reload(' + $psBase + ' -ListOnly)'
 $lockBind = if ($lockNote) { @('--bind', ('ctrl-l:execute(' + $psBase + ' lock)+abort')) } else { @() }
 $picked = $rows | fzf --multi --delimiter "`t" --with-nth 2.. --header $header --preview $previewCmd --preview-window right:50%:wrap --bind $tabBind --bind $refreshBind @lockBind
 
-if (-not $picked) { exit 0 }
+if (-not $picked) {
+  # Ctrl-L ล็อกแล้ว fzf ล้างจอทิ้ง — บอกผลอีกที
+  if ($lockNote -and -not (Test-VaultMounted)) { Write-Host '🔒 Locked' }
+  exit 0
+}
 
 $fields = $picked -split "`t"
 $spath = $fields[0]
