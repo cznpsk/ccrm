@@ -702,6 +702,8 @@ if (Test-VaultConfigured) {
   if (-not (Test-VaultMounted)) {
     Write-Host '🔒 session ถูกล็อกอยู่ (Enter ว่าง = ออก)'
     if (-not (Invoke-VaultUnlock)) { exit 1 }
+    # Enter ที่ค้างจากช่องรหัสจะหลุดเข้า fzf กลายเป็นกด resume — ล้างทิ้งก่อน
+    try { $Host.UI.RawUI.FlushInputBuffer() } catch {}
   }
   $lockNote = '  🔓 Ctrl-L=ล็อก'
 } elseif (-not (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'ccrm-lock-nag-off')) -and (Get-Command fzf -ErrorAction SilentlyContinue)) {
@@ -754,7 +756,8 @@ $tabBind = 'tab:transform:' + $psBase + ' -TabTransform -Sel {+1} -Cur {1}' + $a
 
 $refreshBind = 'ctrl-a:reload(' + $psBase + ' -ListOnly)'
 # fzf บน Windows ไม่มี become — execute แล้ว abort แทน
-$lockBind = if ($lockNote) { @('--bind', ('ctrl-l:execute(' + $psBase + ' lock)+abort')) } else { @() }
+# >CON — output ของ lock ห้ามไหลไปเป็นผลลัพธ์ของ fzf (จะกลายเป็นชื่อ session ที่ไป resume)
+$lockBind = if ($lockNote) { @('--bind', ('ctrl-l:execute(' + $psBase + ' lock >CON)+abort')) } else { @() }
 $picked = $rows | fzf --multi --delimiter "`t" --with-nth 2.. --header $header --preview $previewCmd --preview-window right:50%:wrap --bind $tabBind --bind $refreshBind @lockBind
 
 if (-not $picked) {
