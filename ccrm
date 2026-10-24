@@ -519,7 +519,8 @@ if vault_configured; then
   fi
   lock_note="  🔓 Ctrl-L=ล็อก"
   # execute+abort ไม่ใช่ become — become จะเอา output ของ lock ไปเป็นผลลัพธ์ของ fzf แล้วไป resume มั่ว
-  lock_bind=(--bind "ctrl-l:execute('$0' lock)+abort")
+  # > /dev/tty — output ของ lock ห้ามไหลไปเป็นผลลัพธ์ของ fzf (จะกลายเป็นชื่อ session ที่ไป resume)
+  lock_bind=(--bind "ctrl-l:execute('$0' lock > /dev/tty)+abort")
 elif _is_mac && [[ ! -f "$HOME/.cache/ccrm-lock-nag-off" ]]; then
   choice=$(printf 'ตั้งค่าเลย (ccrm lock-setup)\nไว้ทีหลัง\nไม่ต้องถามอีก\n' \
     | fzf --header="🔐 ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep" --no-multi --reverse --no-info --height=~6 --prompt='เลือก> ')
