@@ -555,7 +555,11 @@ picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t'
   --preview-window=right:50%:wrap \
   --bind "ctrl-a:reload($reload_cmd)" \
   ${lock_bind[@]+"${lock_bind[@]}"} \
-  --bind "tab:transform:if [ \"\$FZF_SELECT_COUNT\" -gt 0 ] && [ {+1} = {1} ]; then echo \"execute-silent(rm -rf {1})+reload($reload_cmd)+clear-selection\"; else echo 'clear-selection+toggle'; fi") || exit 0
+  --bind "tab:transform:if [ \"\$FZF_SELECT_COUNT\" -gt 0 ] && [ {+1} = {1} ]; then echo \"execute-silent(rm -rf {1})+reload($reload_cmd)+clear-selection\"; else echo 'clear-selection+toggle'; fi") || {
+  # Ctrl-L ล็อกแล้ว fzf ล้างจอทิ้ง — บอกผลอีกที
+  [[ -n "$lock_note" ]] && ! vault_mounted && echo "🔒 Locked"
+  exit 0
+}
 
 [[ -n "$picked" ]] || exit 0
 
