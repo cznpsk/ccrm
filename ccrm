@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=23
+ver=24
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -158,7 +158,7 @@ _vault_unlock() {
     return 1
   fi
   _vault_links
-  echo "🔓 Unlocked"
+  echo "🔓 ปลดล็อกแล้ว"
 }
 
 # auto=1 มาจาก sleep hook — ปิด AI CLI ให้เอง แต่ไม่ฆ่าอย่างอื่น ไม่ใช้ -force (กันอิมเมจพัง)
@@ -182,7 +182,7 @@ _vault_lock() {
     if [[ -n "$ai" ]]; then
       if [[ -z "$auto" ]]; then
         echo "AI CLI ยังเปิดอยู่:"; _proc_list "$ai"
-        printf 'ปิดให้แล้วล็อกเลยไหม [y/N] '; read -r yn < /dev/tty
+        printf 'ให้ปิดโปรแกรมพวกนี้แล้วล็อกเลยไหม? พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ไม่ล็อก): '; read -r yn < /dev/tty
         [[ "$yn" =~ ^[Yy] ]] || { echo "ยกเลิก — ยังไม่ล็อก"; return 1; }
       fi
       kill -TERM $ai 2>/dev/null
@@ -203,7 +203,7 @@ _vault_lock() {
     fi
   fi
   _vault_seal
-  echo "🔒 Locked"
+  echo "🔒 ล็อกแล้ว"
 }
 
 _install_wrappers() {
@@ -273,6 +273,25 @@ _vault_status() {
   return 0
 }
 
+# รายการข้อมูลที่ยังไม่อยู่ในวอลต์ (จะถูกย้ายตอน setup) — ให้ผู้ใช้เห็นว่า session เดิมไม่หาย
+_show_pending() {
+  local title="$1" pair name label sz any=""
+  [[ -n "$title" ]] && echo "$title"
+  if ! vault_configured && [[ -d "$vault_mp" ]] && ! vault_mounted; then
+    printf '  • %-7s %s\n' "Claude" "$(du -sh "$vault_mp" 2>/dev/null | cut -f1)"; any=1
+  fi
+  for pair in $vault_links; do
+    name="${pair%%:*}"
+    [[ -e "$HOME/$name" && ! -L "$HOME/$name" ]] || continue
+    case "$name" in
+      .codex) label="Codex" ;; .kimi-code) label="Kimi" ;; .gemini) label="Gemini" ;; *) label="ตั้งค่า Claude" ;;
+    esac
+    sz=$(du -sh "$HOME/$name" 2>/dev/null | cut -f1)
+    printf '  • %-7s %s\n' "$label" "$sz"; any=1
+  done
+  [[ -n "$any" ]] || echo "  (ไม่มี — ทุกอย่างอยู่ในวอลต์แล้ว)"
+}
+
 _vault_setup() {
   _is_mac || { echo "ตั้งค่าล็อกยังรองรับแค่ macOS (Windows กำลังทำ)"; return 1; }
   if [[ -n "${CLAUDECODE:-}" ]]; then
@@ -284,7 +303,8 @@ _vault_setup() {
   fi
   local yn pw pw2
   if vault_configured; then
-    echo "เจอวอลต์เดิมที่ $vault_img — ใช้ต่อ (ไม่สร้างใหม่)"
+    echo "เจอวอลต์เดิมในเครื่องแล้ว — ใช้ต่อ (ไม่สร้างใหม่ ข้อมูลในวอลต์ไม่ถูกแตะ)"
+    _show_pending "ข้อมูลที่ยังอยู่นอกวอลต์ จะย้ายเข้าไปให้:"
     vault_mounted || _vault_unlock || return 1
   else
     if vault_mounted || { [[ -d "$vault_mp" && ! -w "$vault_mp" ]]; }; then
@@ -297,14 +317,17 @@ _vault_setup() {
       [[ -e "$HOME/$name" && ! -L "$HOME/$name" ]] && need=$(( need + $(du -sk "$HOME/$name" | cut -f1) ))
     done
     avail=$(df -k "$HOME" | awk 'NR==2 {print $4}')
-    echo "จะเข้ารหัส session ของ Claude/Codex/Kimi/Gemini ไว้ในดิสก์อิมเมจ AES-256"
-    echo "  ข้อมูลที่ต้องย้าย: $(( need / 1024 )) MB · ที่ว่างดิสก์: $(( avail / 1024 )) MB"
+    echo "🔐 ตั้งค่าล็อก session ด้วยรหัสผ่าน"
+    echo "จะเก็บ session และการล็อกอินของ Claude/Codex/Kimi/Gemini ไว้ในที่เก็บเข้ารหัส (AES-256)"
+    echo "ไม่ต้องย้ายอะไรเอง — session เดิมทั้งหมดจะถูกย้ายเข้าไปให้อัตโนมัติ ใช้ต่อได้เหมือนเดิม:"
+    _show_pending ""
+    echo "  ที่ว่างในเครื่อง: $(df -h "$HOME" | awk 'NR==2 {print $4}')"
     if (( avail < need + 1048576 )); then
       echo "ที่ว่างไม่พอ (ต้องมากกว่าข้อมูล + 1 GB)"; return 1
     fi
     echo ""
     echo "⚠ ลืมรหัสผ่าน = ข้อมูล session ทั้งหมดหายถาวร กู้ไม่ได้ (ไม่มีใครช่วยได้)"
-    printf 'เริ่มเลยไหม [y/N] '; read -r yn < /dev/tty
+    printf 'เริ่มเลยไหม? พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): '; read -r yn < /dev/tty
     [[ "$yn" =~ ^[Yy] ]] || { echo "ยกเลิก"; return 1; }
     while :; do
       pw=$(_read_pw "ตั้งรหัสผ่าน (อย่างน้อย 8 ตัว): ")
@@ -364,7 +387,7 @@ _vault_cleanup() {
   [[ -d "$bk" ]] || { echo "ไม่มีข้อมูลสำรองค้าง"; return 0; }
   vault_mounted || { echo "ปลดล็อกวอลต์ก่อน (ให้แน่ใจว่ารหัสใช้ได้) แล้วค่อยลบ"; return 1; }
   du -sh "$bk"/* 2>/dev/null
-  printf 'ลบข้อมูลเดิมแบบไม่เข้ารหัสทั้งหมดนี้? (ในวอลต์ยังอยู่ครบ) [y/N] '; read -r yn < /dev/tty
+  printf 'ลบสำเนาเดิมที่ไม่เข้ารหัสทั้งหมดนี้? (ข้อมูลในวอลต์ยังอยู่ครบ) พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): '; read -r yn < /dev/tty
   [[ "$yn" =~ ^[Yy] ]] || { echo "ยกเลิก"; return 1; }
   rm -rf "$bk" && echo "ลบแล้ว"
 }
@@ -558,7 +581,7 @@ picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t'
   ${lock_bind[@]+"${lock_bind[@]}"} \
   --bind "tab:transform:if [ \"\$FZF_SELECT_COUNT\" -gt 0 ] && [ {+1} = {1} ]; then echo \"execute-silent(rm -rf {1})+reload($reload_cmd)+clear-selection\"; else echo 'clear-selection+toggle'; fi") || {
   # Ctrl-L ล็อกแล้ว fzf ล้างจอทิ้ง — บอกผลอีกที
-  [[ -n "$lock_note" ]] && ! vault_mounted && echo "🔒 Locked"
+  [[ -n "$lock_note" ]] && ! vault_mounted && echo "🔒 ล็อกแล้ว"
   exit 0
 }
 

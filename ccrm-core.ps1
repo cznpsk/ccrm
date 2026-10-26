@@ -431,7 +431,7 @@ function Invoke-VaultUnlock {
     if (-not $pw) { return $false }
     if (Invoke-VcMount $letter $pw) {
       Sync-VaultLinks $letter $false
-      Write-Host '🔓 Unlocked'
+      Write-Host '🔓 ปลดล็อกแล้ว'
       return $true
     }
     Write-Host "รหัสไม่ถูก ลองใหม่ ($i/3)"
@@ -452,7 +452,7 @@ function Invoke-VaultLock([bool]$auto) {
     if (-not $auto) {
       Write-Host 'AI CLI ยังเปิดอยู่:'
       $ai | ForEach-Object { Write-Host ("  {0} {1}" -f $_.Id, $_.ProcessName) }
-      $yn = Read-Host 'ปิดให้แล้วล็อกเลยไหม [y/N]'
+      $yn = Read-Host 'ให้ปิดโปรแกรมพวกนี้แล้วล็อกเลยไหม? พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ไม่ล็อก)'
       if ($yn -notmatch '^[Yy]') { Write-Host 'ยกเลิก — ยังไม่ล็อก'; return $false }
     }
     $ai | Stop-Process -ErrorAction SilentlyContinue
@@ -466,7 +466,7 @@ function Invoke-VaultLock([bool]$auto) {
     }
   }
   Clear-ClaudeTemp
-  Write-Host '🔒 Locked'
+  Write-Host '🔒 ล็อกแล้ว'
   return $true
 }
 
@@ -547,10 +547,10 @@ function Install-VeraCrypt {
     $si.GetType().InvokeMember('Persist', 'InvokeMethod', $null, $si, $null)
     [void][Runtime.InteropServices.Marshal]::ReleaseComObject($si)
   }
-  # /passive = มีแถบความคืบหน้าแต่ไม่มี dialog ค้างรอกด (error ดูจาก exit code แทน)
-  $msiArgs = "/i `"$msi`" /passive ACCEPTLICENSE=YES /norestart"
+  # /qn = ไม่มีหน้าต่าง installer (ภาษาอังกฤษ + dialog error ค้างรอกด) — บอกเป็นไทยเอง error ดูจาก exit code
+  $msiArgs = "/i `"$msi`" /qn ACCEPTLICENSE=YES /norestart"
   $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-  Write-Host 'ติดตั้ง VeraCrypt (มีหน้าต่างขอสิทธิ์ admin ให้กด Yes) ...'
+  Write-Host 'กำลังติดตั้ง VeraCrypt (โปรแกรมเข้ารหัส) — ถ้ามีหน้าต่างถามสิทธิ์ ให้กด "ใช่/Yes" แล้วรอสักครู่ ...'
   try {
     if ($isAdmin) { $p = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru }
     else { $p = Start-Process msiexec.exe -ArgumentList $msiArgs -Verb RunAs -Wait -PassThru }
@@ -558,6 +558,22 @@ function Install-VeraCrypt {
   Remove-Item -LiteralPath $msi -Force -ErrorAction SilentlyContinue
   if (-not (Get-VcExe 'VeraCrypt.exe')) { Write-Host "ติดตั้ง VeraCrypt ไม่สำเร็จ (exit $($p.ExitCode))"; return $false }
   return $true
+}
+
+# รายการข้อมูลที่ยังไม่อยู่ในวอลต์ (จะถูกย้ายตอน setup) — ให้ผู้ใช้เห็นว่า session เดิมไม่หาย
+function Show-Pending([string]$title) {
+  if ($title) { Write-Host $title }
+  $labels = @{ '.claude' = 'Claude'; '.codex' = 'Codex'; '.kimi-code' = 'Kimi'; '.gemini' = 'Gemini' }
+  $any = $false
+  foreach ($k in $vaultLinks.Keys) {
+    $p = Join-Path $HOME $k
+    $it = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+    if ($it -and $it.LinkType -ne 'Junction') {
+      Write-Host ("  • {0,-7} {1}B" -f $labels[$k], (Format-Size (Get-DirSize $p)))
+      $any = $true
+    }
+  }
+  if (-not $any) { Write-Host '  (ไม่มี — ทุกอย่างอยู่ในวอลต์แล้ว)' }
 }
 
 function Invoke-VaultSetup {
@@ -571,7 +587,8 @@ function Invoke-VaultSetup {
   if (-not (Install-VeraCrypt)) { return }
   $letter = $null
   if (Test-VaultConfigured) {
-    Write-Host "เจอวอลต์เดิมที่ $vaultFile — ใช้ต่อ (ไม่สร้างใหม่)"
+    Write-Host 'เจอวอลต์เดิมในเครื่องแล้ว — ใช้ต่อ (ไม่สร้างใหม่ ข้อมูลในวอลต์ไม่ถูกแตะ)'
+    Show-Pending 'ข้อมูลที่ยังอยู่นอกวอลต์ จะย้ายเข้าไปให้:'
     if (-not (Invoke-VaultUnlock)) { return }
     $letter = Get-VaultLetter
   } else {
@@ -582,12 +599,15 @@ function Invoke-VaultSetup {
       if ($it -and $it.LinkType -ne 'Junction') { $need += [long](Get-DirSize $p) }
     }
     $drive = New-Object System.IO.DriveInfo ($env:LOCALAPPDATA.Substring(0, 1))
-    Write-Host 'จะเข้ารหัส session ของ Claude/Codex/Kimi/Gemini ไว้ในคอนเทนเนอร์ VeraCrypt (AES)'
-    Write-Host ("  ข้อมูลที่ต้องย้าย: {0}B · ที่ว่างดิสก์: {1}B" -f (Format-Size $need), (Format-Size $drive.AvailableFreeSpace))
+    Write-Host '🔐 ตั้งค่าล็อก session ด้วยรหัสผ่าน'
+    Write-Host 'จะเก็บ session และการล็อกอินของ Claude/Codex/Kimi/Gemini ไว้ในที่เก็บเข้ารหัส (VeraCrypt AES)'
+    Write-Host 'ไม่ต้องย้ายอะไรเอง — session เดิมทั้งหมดจะถูกย้ายเข้าไปให้อัตโนมัติ ใช้ต่อได้เหมือนเดิม:'
+    Show-Pending ''
+    Write-Host ("  ที่ว่างในเครื่อง: {0}B" -f (Format-Size $drive.AvailableFreeSpace))
     if ($drive.AvailableFreeSpace -lt ($need + 1GB)) { Write-Host 'ที่ว่างไม่พอ (ต้องมากกว่าข้อมูล + 1 GB)'; return }
     Write-Host ''
     Write-Host '⚠ ลืมรหัสผ่าน = ข้อมูล session ทั้งหมดหายถาวร กู้ไม่ได้ (ไม่มีใครช่วยได้)'
-    $yn = Read-Host 'เริ่มเลยไหม [y/N]'
+    $yn = Read-Host 'เริ่มเลยไหม? พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก)'
     if ($yn -notmatch '^[Yy]') { Write-Host 'ยกเลิก'; return }
     while ($true) {
       $pw = Read-Pw 'ตั้งรหัสผ่าน (อย่างน้อย 8 ตัว ห้ามมี ")'
@@ -629,7 +649,7 @@ function Invoke-VaultCleanup {
   if (-not (Test-Path -LiteralPath $plainBackup)) { Write-Host 'ไม่มีข้อมูลสำรองค้าง'; return }
   if (-not (Test-VaultMounted)) { Write-Host 'ปลดล็อกวอลต์ก่อน (ให้แน่ใจว่ารหัสใช้ได้) แล้วค่อยลบ'; return }
   Get-ChildItem -LiteralPath $plainBackup -Force | ForEach-Object { Write-Host ('  ' + $_.Name) }
-  $yn = Read-Host 'ลบข้อมูลเดิมแบบไม่เข้ารหัสทั้งหมดนี้? (ในวอลต์ยังอยู่ครบ) [y/N]'
+  $yn = Read-Host 'ลบสำเนาเดิมที่ไม่เข้ารหัสทั้งหมดนี้? (ข้อมูลในวอลต์ยังอยู่ครบ) พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก)'
   if ($yn -notmatch '^[Yy]') { Write-Host 'ยกเลิก'; return }
   Remove-Item -LiteralPath $plainBackup -Recurse -Force
   Write-Host 'ลบแล้ว'
@@ -724,7 +744,7 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 23
+$ver = 24
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://github.com/cznpsk/ccrm/releases/latest/download/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
@@ -762,7 +782,7 @@ $picked = $rows | fzf --multi --delimiter "`t" --with-nth 2.. --header $header -
 
 if (-not $picked) {
   # Ctrl-L ล็อกแล้ว fzf ล้างจอทิ้ง — บอกผลอีกที
-  if ($lockNote -and -not (Test-VaultMounted)) { Write-Host '🔒 Locked' }
+  if ($lockNote -and -not (Test-VaultMounted)) { Write-Host '🔒 ล็อกแล้ว' }
   exit 0
 }
 
