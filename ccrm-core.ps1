@@ -423,13 +423,16 @@ function Sync-VaultLinks([string]$letter, [bool]$adopt) {
       $a = $ln.Split('|')
       if ($a.Count -ne 2) { continue }
       $dst = $letter + ':\' + $a[1]
+      # ไดรฟ์ภายนอกถอดอยู่ — ข้าม ไม่ต้องฟ้อง error ทุกครั้งที่ปลดล็อก
+      if (-not (Test-Path -LiteralPath (Split-Path $a[0]))) { continue }
       if ((Test-Path -LiteralPath $dst) -and -not (Set-Junction $a[0] $dst)) { Write-Host "  ! $($a[0]) ไม่ใช่ junction ข้ามไป" }
     }
   }
 }
 
+# Process ก่อน — CLI ได้ค่าจาก terminal ที่เปิดมัน ($PROFILE ทับ User ได้)
 function Get-EnvValue([string]$name) {
-  foreach ($scope in 'User', 'Process', 'Machine') {
+  foreach ($scope in 'Process', 'User', 'Machine') {
     $v = [Environment]::GetEnvironmentVariable($name, $scope)
     if ($v) { return [Environment]::ExpandEnvironmentVariables($v).TrimEnd('\', '/') }
   }

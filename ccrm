@@ -446,16 +446,25 @@ _vault_cleanup() {
   vault_mounted || { echo "ปลดล็อกวอลต์ก่อน (ให้แน่ใจว่ารหัสใช้ได้) แล้วค่อยลบ"; return 1; }
   # ชื่อสำรองขึ้นต้นด้วยจุด (.gemini.xxx) — glob * เฉยๆ ไม่เห็น
   du -sh "$bk"/.[!.]* "$bk"/* 2>/dev/null | grep -v '/ext-backups.txt$' 
-  local ext=() p
+  local ext=() miss=() p
   if [[ -f "$bk/ext-backups.txt" ]]; then
     while IFS= read -r p; do
-      [[ "$p" == *.ccrm-plain-* && -e "$p" ]] && ext+=("$p")
+      [[ "$p" == *.ccrm-plain-* ]] || continue
+      if [[ -e "$p" ]]; then ext+=("$p"); else miss+=("$p"); fi
     done < "$bk/ext-backups.txt"
     (( ${#ext[@]} )) && du -sh "${ext[@]}" 2>/dev/null
   fi
   printf 'ลบสำเนาเดิมที่ไม่เข้ารหัสทั้งหมดนี้? (ข้อมูลในวอลต์ยังอยู่ครบ) พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): '; read -r yn < /dev/tty
   [[ "$yn" =~ ^[Yy] ]] || { echo "ยกเลิก"; return 1; }
   (( ${#ext[@]} )) && rm -rf "${ext[@]}"
+  if (( ${#miss[@]} )); then
+    # ดิสก์ภายนอกไม่ได้เสียบ — เก็บรายการไว้ ลบครั้งหน้า
+    find "$bk" -mindepth 1 ! -name ext-backups.txt -exec rm -rf {} + 2>/dev/null
+    printf '%s\n' "${miss[@]}" > "$bk/ext-backups.txt"
+    echo "ลบแล้ว ยกเว้นสำเนาบนดิสก์ที่ไม่ได้เสียบอยู่ (เสียบแล้วสั่ง ccrm lock-cleanup อีกรอบ):"
+    printf '  %s\n' "${miss[@]}"
+    return 0
+  fi
   rm -rf "$bk" && echo "ลบแล้ว"
 }
 
