@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=24
+ver=25
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -24,6 +24,8 @@ vault_img="$HOME/Library/Application Support/.ws.sparsebundle"
 vault_mp="$HOME/.claude"
 # ชื่อใน HOME : ชื่อในวอลต์
 vault_links=".codex:codex-data .kimi-code:kimi-data .gemini:gemini-data .claude.json:claude.json"
+# ตัวแปรที่ย้ายที่เก็บไปไว้ที่อื่น : ชื่อปกติใน HOME : ชื่อในวอลต์ : ชื่อแสดง
+vault_ext_vars="CLAUDE_CONFIG_DIR:.claude:ext-claude:Claude CODEX_HOME:.codex:ext-codex:Codex"
 sleep_plist="$HOME/Library/LaunchAgents/com.cznpsk.ccrm-sleeplock.plist"
 # ไฟล์ชั่วคราวของ Claude (task output ฯลฯ) ลบตอนล็อก — ไม่อิง HOME เลยเปิดให้ override ตอนเทสต์
 claude_tmp="${CCRM_CLAUDE_TMP:-/private/tmp/claude-$(id -u)}"
@@ -82,8 +84,9 @@ _vault_attach() {
 }
 
 # ย้าย $1 (ไฟล์/โฟลเดอร์จริงใน HOME) เข้าวอลต์ที่ $2 — copy → เทียบ → ของเดิมย้ายไปที่สำรอง ไม่ลบ
+# ext=1 (ที่เก็บนอก HOME) — ของเดิมเปลี่ยนชื่อไว้ข้างๆ แทน (ไม่ต้อง copy ข้ามดิสก์ซ้ำ) แล้วจดไว้ให้ lock-cleanup ลบ
 _vault_adopt() {
-  local src="$1" dst="$2" s1 s2 bk
+  local src="$1" dst="$2" ext="${3:-}" s1 s2 bk
   ditto "$src" "$dst" || { echo "  ✗ copy $src ไม่สำเร็จ ไม่แตะของเดิม"; rm -rf "$dst"; return 1; }
   s1=$(_tree_sig "$src"); s2=$(_tree_sig "$dst")
   if [[ "$s1" != "$s2" ]]; then
@@ -93,8 +96,46 @@ _vault_adopt() {
   fi
   bk="$HOME/.ccrm-plain-backup"
   mkdir -p "$bk"; chmod 700 "$bk"
+  if [[ -n "$ext" ]]; then
+    local old="$src.ccrm-plain-$(date +%Y%m%d-%H%M%S)"
+    mv "$src" "$old" || { echo "  ✗ เปลี่ยนชื่อ $src ไม่ได้ ไม่แตะของเดิม"; rm -rf "$dst"; return 1; }
+    if ! ln -s "$dst" "$src"; then
+      mv "$old" "$src"; rm -rf "$dst"
+      echo "  ✗ สร้าง symlink ที่ $src ไม่ได้ คืนของเดิมแล้ว"; return 1
+    fi
+    echo "$old" >> "$bk/ext-backups.txt"
+    echo "  ✓ ย้าย $src เข้าวอลต์แล้ว (${s1%% *} ไฟล์)"
+    return 0
+  fi
   mv "$src" "$bk/$(basename "$src").$(date +%Y%m%d-%H%M%S)"
   echo "  ✓ ย้าย ~/$(basename "$src") เข้าวอลต์แล้ว (${s1%% *} ไฟล์)"
+}
+
+# ที่เก็บที่ตั้งตัวแปรให้ไปอยู่นอกที่ปกติ (และยังไม่ได้ย้าย) — ทีละบรรทัด: path|ชื่อในวอลต์|ชื่อแสดง
+_ext_dirs() {
+  local spec var def inner label p
+  for spec in $vault_ext_vars; do
+    IFS=: read -r var def inner label <<< "$spec"
+    p="${!var:-}"
+    [[ -n "$p" ]] || continue
+    [[ "$p" == "~/"* ]] && p="$HOME/${p#\~/}"
+    while [[ "$p" == */ && "$p" != / ]]; do p="${p%/}"; done
+    [[ "$p" == "$HOME/$def" || "$p" == "$vault_mp" || "$p" == "$vault_mp/"* ]] && continue
+    [[ -d "$p" && ! -L "$p" ]] || continue
+    echo "$p|$inner|$label"
+  done
+}
+
+# ย้ายที่เก็บนอกที่ปกติเข้าวอลต์ แล้วทิ้ง symlink ไว้ที่เดิม — ตัวแปรยังชี้ที่เดิมได้ ไม่ต้องแก้ .zshrc
+_vault_ext_links() {
+  local p inner label
+  while IFS='|' read -r p inner label; do
+    [[ -n "$p" ]] || continue
+    if [[ -e "$vault_mp/$inner" ]]; then
+      echo "  ! มี $inner ในวอลต์อยู่แล้ว ไม่แตะ $p — รวมเองแล้วรัน ccrm lock-setup ใหม่"; continue
+    fi
+    _vault_adopt "$p" "$vault_mp/$inner" 1
+  done < <(_ext_dirs)
 }
 
 # ให้ทุกค่ายชี้เข้าวอลต์ — adopt=1 ย้ายของที่ยังอยู่ข้างนอกเข้ามาด้วย (ตอน setup)
@@ -264,6 +305,15 @@ EOF
   echo "  ✓ ล็อกอัตโนมัติตอนเครื่อง sleep (ปิดฝา) — AI CLI ที่เปิดค้างจะถูกปิดให้ก่อนล็อก"
 }
 
+# ขนาดรวม (KB) ของที่เก็บนอกที่ปกติ
+_ext_size() {
+  local p inner label t=0
+  while IFS='|' read -r p inner label; do
+    [[ -n "$p" ]] && t=$(( t + $(du -sk "$p" | cut -f1) ))
+  done < <(_ext_dirs)
+  echo "$t"
+}
+
 _vault_status() {
   if ! _is_mac; then echo "ล็อกยังรองรับแค่ macOS"; return 0; fi
   if ! vault_configured; then echo "ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup"; return 0; fi
@@ -289,6 +339,11 @@ _show_pending() {
     sz=$(du -sh "$HOME/$name" 2>/dev/null | cut -f1)
     printf '  • %-7s %s\n' "$label" "$sz"; any=1
   done
+  local p inner
+  while IFS='|' read -r p inner label; do
+    [[ -n "$p" ]] || continue
+    printf '  • %-7s %s  (%s)\n' "$label" "$(du -sh "$p" 2>/dev/null | cut -f1)" "$p"; any=1
+  done < <(_ext_dirs)
   [[ -n "$any" ]] || echo "  (ไม่มี — ทุกอย่างอยู่ในวอลต์แล้ว)"
 }
 
@@ -316,6 +371,7 @@ _vault_setup() {
       name="${pair%%:*}"
       [[ -e "$HOME/$name" && ! -L "$HOME/$name" ]] && need=$(( need + $(du -sk "$HOME/$name" | cut -f1) ))
     done
+    need=$(( need + $(_ext_size) ))
     avail=$(df -k "$HOME" | awk 'NR==2 {print $4}')
     echo "🔐 ตั้งค่าล็อก session ด้วยรหัสผ่าน"
     echo "จะเก็บ session และการล็อกอินของ Claude/Codex/Kimi/Gemini ไว้ในที่เก็บเข้ารหัส (AES-256)"
@@ -363,6 +419,7 @@ _vault_setup() {
     name="${pair%%:*}"
     [[ -e "$HOME/$name" && ! -L "$HOME/$name" ]] && pend=$(( pend + $(du -sk "$HOME/$name" | cut -f1) ))
   done
+  pend=$(( pend + $(_ext_size) ))
   vfree=$(df -k "$vault_mp" | awk 'NR==2 {print $4}')
   if (( pend > 0 && vfree < pend + 524288 )); then
     echo "ที่ว่างในวอลต์ไม่พอ: ต้องย้าย $(( pend / 1024 )) MB แต่วอลต์ว่าง $(( vfree / 1024 )) MB (ต้องเหลือเผื่อ 512 MB)"
@@ -370,6 +427,7 @@ _vault_setup() {
     return 1
   fi
   _vault_links 1
+  _vault_ext_links
   # cache ชื่อ session (ข้อความแรกของแต่ละแชท) ต้องอยู่ในวอลต์ด้วย
   mkdir -p "$vault_mp/.ccrm"
   [[ -f "$HOME/.cache/ccrm-labels.tsv" ]] && mv "$HOME/.cache/ccrm-labels.tsv" "$vault_mp/.ccrm/labels.tsv"
@@ -386,9 +444,18 @@ _vault_cleanup() {
   local bk="$HOME/.ccrm-plain-backup" yn
   [[ -d "$bk" ]] || { echo "ไม่มีข้อมูลสำรองค้าง"; return 0; }
   vault_mounted || { echo "ปลดล็อกวอลต์ก่อน (ให้แน่ใจว่ารหัสใช้ได้) แล้วค่อยลบ"; return 1; }
-  du -sh "$bk"/* 2>/dev/null
+  # ชื่อสำรองขึ้นต้นด้วยจุด (.gemini.xxx) — glob * เฉยๆ ไม่เห็น
+  du -sh "$bk"/.[!.]* "$bk"/* 2>/dev/null | grep -v '/ext-backups.txt$' 
+  local ext=() p
+  if [[ -f "$bk/ext-backups.txt" ]]; then
+    while IFS= read -r p; do
+      [[ "$p" == *.ccrm-plain-* && -e "$p" ]] && ext+=("$p")
+    done < "$bk/ext-backups.txt"
+    (( ${#ext[@]} )) && du -sh "${ext[@]}" 2>/dev/null
+  fi
   printf 'ลบสำเนาเดิมที่ไม่เข้ารหัสทั้งหมดนี้? (ข้อมูลในวอลต์ยังอยู่ครบ) พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): '; read -r yn < /dev/tty
   [[ "$yn" =~ ^[Yy] ]] || { echo "ยกเลิก"; return 1; }
+  (( ${#ext[@]} )) && rm -rf "${ext[@]}"
   rm -rf "$bk" && echo "ลบแล้ว"
 }
 

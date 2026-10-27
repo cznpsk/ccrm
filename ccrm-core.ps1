@@ -297,6 +297,10 @@ $vaultDir = Join-Path $env:LOCALAPPDATA 'ccrm'
 $vaultFile = Join-Path $vaultDir 'vault.hc'
 $vaultLinks = [ordered]@{ '.claude' = 'claude'; '.codex' = 'codex-data'; '.kimi-code' = 'kimi-data'; '.gemini' = 'gemini-data' }
 $plainBackup = Join-Path $HOME '.ccrm-plain-backup'
+# ตัวแปรที่ย้ายที่เก็บของค่ายไปไว้ที่อื่น — ย้ายเข้าวอลต์แล้ว junction ที่เดิมชี้เข้าไป ตัวแปรใช้ค่าเดิมต่อได้
+$extVars = [ordered]@{ 'CLAUDE_CONFIG_DIR' = @('.claude', 'ext-claude', 'Claude'); 'CODEX_HOME' = @('.codex', 'ext-codex', 'Codex') }
+# รายการในวอลต์ (path|ชื่อในวอลต์) ไว้ซ่อม junction ตอนได้อักษรไดรฟ์ใหม่
+$extList = 'ext-links.txt'
 $taskName = 'ccrm-sleeplock'
 
 function Get-VcExe([string]$name) {
@@ -411,6 +415,67 @@ function Sync-VaultLinks([string]$letter, [bool]$adopt) {
       New-Item -ItemType Directory -Force -Path $plainBackup | Out-Null
       Move-Item -LiteralPath $cj -Destination (Join-Path $plainBackup ('.claude.json.' + (Get-Date -Format 'yyyyMMdd-HHmmss')))
     }
+  }
+  # junction ของที่เก็บนอกที่ปกติ — ชี้อักษรไดรฟ์ปัจจุบัน
+  $lf = $letter + ':\' + $extList
+  if (Test-Path -LiteralPath $lf) {
+    foreach ($ln in @(Get-Content -LiteralPath $lf -Encoding UTF8)) {
+      $a = $ln.Split('|')
+      if ($a.Count -ne 2) { continue }
+      $dst = $letter + ':\' + $a[1]
+      if ((Test-Path -LiteralPath $dst) -and -not (Set-Junction $a[0] $dst)) { Write-Host "  ! $($a[0]) ไม่ใช่ junction ข้ามไป" }
+    }
+  }
+}
+
+function Get-EnvValue([string]$name) {
+  foreach ($scope in 'User', 'Process', 'Machine') {
+    $v = [Environment]::GetEnvironmentVariable($name, $scope)
+    if ($v) { return [Environment]::ExpandEnvironmentVariables($v).TrimEnd('\', '/') }
+  }
+  return $null
+}
+
+# ที่เก็บที่ตั้งตัวแปรให้ไปอยู่นอกที่ปกติ และยังเป็นโฟลเดอร์จริง (ยังไม่ได้ย้าย)
+function Get-ExtDirs {
+  $vl = Get-VaultLetter
+  $out = @()
+  foreach ($v in $extVars.Keys) {
+    $p = Get-EnvValue $v
+    if (-not $p) { continue }
+    $def = $extVars[$v]
+    if ($p -ieq (Join-Path $HOME $def[0])) { continue }
+    if ($vl -and $p -like ($vl + ':\*')) { continue }
+    $it = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+    if (-not $it -or -not $it.PSIsContainer -or $it.LinkType) { continue }
+    $out += [pscustomobject]@{ Path = $p; Inner = $def[1]; Label = $def[2] }
+  }
+  return $out
+}
+
+# ย้ายที่เก็บนอกที่ปกติเข้าวอลต์ — copy → เทียบ → ของเดิมเปลี่ยนชื่อไว้ข้างๆ (ไม่ copy ข้ามไดรฟ์ซ้ำ) → junction ที่เดิม
+function Move-ExtDirs([string]$letter) {
+  foreach ($e in @(Get-ExtDirs)) {
+    $src = $e.Path
+    $dst = $letter + ':\' + $e.Inner
+    if (Test-Path -LiteralPath $dst) { Write-Host "  ! มี $($e.Inner) ในวอลต์อยู่แล้ว ไม่แตะ $src — รวมเองแล้วรัน ccrm lock-setup ใหม่"; continue }
+    & robocopy $src $dst /E /COPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { Write-Host "  ✗ copy $src ไม่สำเร็จ ไม่แตะของเดิม"; Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue; continue }
+    $s1 = Get-TreeSig $src; $s2 = Get-TreeSig $dst
+    if ($s1 -ne $s2) { Write-Host "  ✗ $src copy ไม่ครบ ($s1 ≠ $s2) ไม่แตะของเดิม"; Remove-Item -LiteralPath $dst -Recurse -Force; continue }
+    $old = $src + '.ccrm-plain-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+    try { Rename-Item -LiteralPath $src -NewName (Split-Path $old -Leaf) -ErrorAction Stop }
+    catch { Write-Host "  ✗ เปลี่ยนชื่อ $src ไม่ได้ (มีโปรแกรมเปิดอยู่?) ไม่แตะของเดิม"; Remove-Item -LiteralPath $dst -Recurse -Force; continue }
+    try { New-Item -ItemType Junction -Path $src -Target $dst -ErrorAction Stop | Out-Null }
+    catch {
+      Rename-Item -LiteralPath $old -NewName (Split-Path $src -Leaf)
+      Remove-Item -LiteralPath $dst -Recurse -Force
+      Write-Host "  ✗ สร้าง junction ที่ $src ไม่ได้ คืนของเดิมแล้ว"; continue
+    }
+    New-Item -ItemType Directory -Force -Path $plainBackup | Out-Null
+    Add-Content -LiteralPath (Join-Path $plainBackup 'ext-backups.txt') -Value $old -Encoding UTF8
+    Add-Content -LiteralPath ($letter + ':\' + $extList) -Value ($src + '|' + $e.Inner) -Encoding UTF8
+    Write-Host "  ✓ ย้าย $src เข้าวอลต์แล้ว ($($s1.Split(' ')[0]) ไฟล์)"
   }
 }
 
@@ -573,6 +638,10 @@ function Show-Pending([string]$title) {
       $any = $true
     }
   }
+  foreach ($e in @(Get-ExtDirs)) {
+    Write-Host ("  • {0,-7} {1}B  ({2})" -f $e.Label, (Format-Size (Get-DirSize $e.Path)), $e.Path)
+    $any = $true
+  }
   if (-not $any) { Write-Host '  (ไม่มี — ทุกอย่างอยู่ในวอลต์แล้ว)' }
 }
 
@@ -598,6 +667,7 @@ function Invoke-VaultSetup {
       $it = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
       if ($it -and $it.LinkType -ne 'Junction') { $need += [long](Get-DirSize $p) }
     }
+    foreach ($e in @(Get-ExtDirs)) { $need += [long](Get-DirSize $e.Path) }
     $drive = New-Object System.IO.DriveInfo ($env:LOCALAPPDATA.Substring(0, 1))
     Write-Host '🔐 ตั้งค่าล็อก session ด้วยรหัสผ่าน'
     Write-Host 'จะเก็บ session และการล็อกอินของ Claude/Codex/Kimi/Gemini ไว้ในที่เก็บเข้ารหัส (VeraCrypt AES)'
@@ -627,10 +697,17 @@ function Invoke-VaultSetup {
     if (-not (Invoke-VcMount $letter $pw)) { Write-Host 'mount ไม่สำเร็จ ข้อมูลเดิมไม่ถูกแตะ'; return }
   }
   Sync-VaultLinks $letter $true
+  Move-ExtDirs $letter
   # Claude อ่าน .claude.json จาก CLAUDE_CONFIG_DIR — ชี้ไปใน ~\.claude (ซึ่งอยู่ในวอลต์)
+  # ถ้าเดิมตั้งไว้ที่อื่น (ย้ายเข้าวอลต์แล้วเป็น junction) ใช้ค่าเดิมต่อ ห้ามทับ ไม่งั้น Claude เปิดมาเหมือนเครื่องใหม่
   $cfg = Join-Path $HOME '.claude'
-  [Environment]::SetEnvironmentVariable('CLAUDE_CONFIG_DIR', $cfg, 'User')
-  $env:CLAUDE_CONFIG_DIR = $cfg
+  $curCfg = Get-EnvValue 'CLAUDE_CONFIG_DIR'
+  if ($curCfg -and ($curCfg -ine $cfg) -and (Get-Item -LiteralPath $curCfg -Force -ErrorAction SilentlyContinue)) {
+    Write-Host "  ใช้ CLAUDE_CONFIG_DIR เดิมต่อ ($curCfg)"
+  } else {
+    [Environment]::SetEnvironmentVariable('CLAUDE_CONFIG_DIR', $cfg, 'User')
+    $env:CLAUDE_CONFIG_DIR = $cfg
+  }
   # cache ชื่อ session ต้องอยู่ในวอลต์ด้วย
   $oldCache = Join-Path $env:LOCALAPPDATA 'ccrm-labels.tsv'
   if (Test-Path -LiteralPath $oldCache) {
@@ -648,9 +725,16 @@ function Invoke-VaultSetup {
 function Invoke-VaultCleanup {
   if (-not (Test-Path -LiteralPath $plainBackup)) { Write-Host 'ไม่มีข้อมูลสำรองค้าง'; return }
   if (-not (Test-VaultMounted)) { Write-Host 'ปลดล็อกวอลต์ก่อน (ให้แน่ใจว่ารหัสใช้ได้) แล้วค่อยลบ'; return }
-  Get-ChildItem -LiteralPath $plainBackup -Force | ForEach-Object { Write-Host ('  ' + $_.Name) }
+  $extBk = Join-Path $plainBackup 'ext-backups.txt'
+  $ext = @()
+  if (Test-Path -LiteralPath $extBk) {
+    $ext = @(Get-Content -LiteralPath $extBk -Encoding UTF8 | Where-Object { $_ -like '*.ccrm-plain-*' -and (Test-Path -LiteralPath $_) })
+  }
+  Get-ChildItem -LiteralPath $plainBackup -Force | Where-Object { $_.Name -ne 'ext-backups.txt' } | ForEach-Object { Write-Host ('  ' + $_.Name) }
+  $ext | ForEach-Object { Write-Host ('  ' + $_) }
   $yn = Read-Host 'ลบสำเนาเดิมที่ไม่เข้ารหัสทั้งหมดนี้? (ข้อมูลในวอลต์ยังอยู่ครบ) พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก)'
   if ($yn -notmatch '^[Yy]') { Write-Host 'ยกเลิก'; return }
+  foreach ($p in $ext) { Remove-Item -LiteralPath $p -Recurse -Force }
   Remove-Item -LiteralPath $plainBackup -Recurse -Force
   Write-Host 'ลบแล้ว'
 }
@@ -744,7 +828,7 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 24
+$ver = 25
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://github.com/cznpsk/ccrm/releases/latest/download/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
