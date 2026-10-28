@@ -77,7 +77,7 @@ function Get-ClaudeLabel([string]$sPath) {
   $m = Select-String -LiteralPath $sPath -Pattern '"customTitle":"([^"]*)"' -ErrorAction SilentlyContinue | Select-Object -Last 1
   if ($m) {
     $val = $m.Matches[0].Groups[1].Value
-    if ($val) { return $val.Substring(0, [Math]::Min(70, $val.Length)) }
+    if ($val) { return $val.Substring(0, [Math]::Min(200, $val.Length)) }
   }
   $lines = Read-FileLines $sPath 200
   foreach ($line in $lines) {
@@ -95,7 +95,7 @@ function Get-ClaudeLabel([string]$sPath) {
         $text = ($parts -join ' ')
       }
       if ($text -and -not $text.StartsWith('<')) {
-        return $text.Substring(0, [Math]::Min(70, $text.Length))
+        return $text.Substring(0, [Math]::Min(200, $text.Length))
       }
     }
   }
@@ -126,7 +126,7 @@ function Get-CodexLabel([string]$sPath) {
     if ($m) {
       try {
         $name = ($m.Line | ConvertFrom-Json).thread_name
-        if ($name) { return $name.Substring(0, [Math]::Min(70, $name.Length)) }
+        if ($name) { return $name.Substring(0, [Math]::Min(200, $name.Length)) }
       } catch {}
     }
   }
@@ -138,7 +138,7 @@ function Get-CodexLabel([string]$sPath) {
     if ($obj.type -eq 'response_item' -and $obj.payload.role -eq 'user') {
       foreach ($c in $obj.payload.content) {
         if ($c.type -eq 'input_text' -and $c.text -and -not $c.text.StartsWith('<')) {
-          return $c.text.Substring(0, [Math]::Min(70, $c.text.Length))
+          return $c.text.Substring(0, [Math]::Min(200, $c.text.Length))
         }
       }
     }
@@ -169,7 +169,7 @@ function Get-KimiLabel([string]$sessionDir) {
     }
   }
   if (-not $title) { return '(ว่าง)' }
-  return $title.Substring(0, [Math]::Min(70, $title.Length))
+  return $title.Substring(0, [Math]::Min(200, $title.Length))
 }
 
 function Get-GeminiLabel([string]$sPath) {
@@ -179,7 +179,7 @@ function Get-GeminiLabel([string]$sPath) {
   foreach ($m in $data.messages) {
     if ($m.type -eq 'user') {
       foreach ($c in $m.content) {
-        if ($c.text) { return $c.text.Substring(0, [Math]::Min(70, $c.text.Length)) }
+        if ($c.text) { return $c.text.Substring(0, [Math]::Min(200, $c.text.Length)) }
       }
     }
   }
@@ -197,7 +197,7 @@ function Get-TailTitle([string]$p, [long]$from) {
     $ms = [regex]::Matches($txt, '"customTitle":"([^"]*)"')
     if ($ms.Count -gt 0) {
       $v = $ms[$ms.Count - 1].Groups[1].Value
-      if ($v) { return $v.Substring(0, [Math]::Min(70, $v.Length)) }
+      if ($v) { return $v.Substring(0, [Math]::Min(200, $v.Length)) }
     }
   } catch {}
   return $null
@@ -262,12 +262,12 @@ function Get-SessionRows([bool]$includeAll) {
   $items = @($items | Sort-Object Time -Descending)
 
   # cache ชื่อ session ตาม path+mtime — ไฟล์ใหญ่หลักร้อย MB สแกนหา customTitle ครั้งเดียวพอ
-  $cacheFile = Join-Path $env:LOCALAPPDATA 'ccrm-labels.tsv'
+  $cacheFile = Join-Path $env:LOCALAPPDATA 'ccrm-labels2.tsv'
   # มีวอลต์ = cache อยู่ในวอลต์ด้วย (เก็บข้อความแรกของแต่ละแชท ห้ามหลุดออกมาข้างนอก)
   if (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'ccrm\vault.hc')) {
     $cacheDir = Join-Path $HOME '.claude\.ccrm'
     New-Item -ItemType Directory -Force -Path $cacheDir -ErrorAction SilentlyContinue | Out-Null
-    $cacheFile = Join-Path $cacheDir 'labels.tsv'
+    $cacheFile = Join-Path $cacheDir 'labels2.tsv'
   }
   $cache = @{}
   $byPath = @{}   # entry ล่าสุดต่อ path — ไว้ทำ incremental scan ของ claude
@@ -287,8 +287,10 @@ function Get-SessionRows([bool]$includeAll) {
   }
   $newLines = New-Object System.Text.StringBuilder
 
-  # 🔒 หน้าแถวที่โปรเจกต์อยู่ในวอลต์ — ไม่มีวอลต์/ล็อกอยู่ ไม่ต้องดู (cwd ไม่เปลี่ยน cache ตาม path)
+  # ไอคอนหน้าแถว: 🔒 = ไฟล์แชทอยู่ในวอลต์, 📁 = โฟลเดอร์โปรเจกต์ (cwd) อยู่ในวอลต์ด้วย
+  # ไม่มีวอลต์/ล็อกอยู่ ไม่ต้องดู · cwd ของแชทไม่เปลี่ยน cache ตาม path
   $vl = Get-VaultLetter
+  $encRoots = @()
   $inVault = @()
   $cwdCache = @{}
   $cwdFile = $null
@@ -296,6 +298,17 @@ function Get-SessionRows([bool]$includeAll) {
   if ($vl) {
     $inVault = @($vl + ':\') + @($vaultLinks.Keys | ForEach-Object { (Join-Path $HOME $_) + '\' })
     $cwdFile = Join-Path $HOME '.claude\.ccrm\cwd.tsv'
+    # ที่เก็บแชทที่เป็น junction เข้าไดรฟ์วอลต์ (หรืออยู่บนไดรฟ์วอลต์เอง)
+    foreach ($r in @(Get-Roots 'CLAUDE_CONFIG_DIR' '.claude') + @(Get-Roots 'CODEX_HOME' '.codex') + @((Join-Path $HOME '.kimi-code'), (Join-Path $HOME '.gemini'))) {
+      $it = Get-Item -LiteralPath $r -Force -ErrorAction SilentlyContinue
+      if (-not $it) { continue }
+      $t = if ($it.LinkType -eq 'Junction') { [string]@($it.Target)[0] } else { $it.FullName }
+      if ($t -like ($vl + ':\*')) { $encRoots += ($r.TrimEnd('\') + '\') }
+    }
+    # โปรเจกต์ที่ย้ายเข้าวอลต์แล้วทิ้ง junction ไว้ที่เดิม (จดไว้ใน ext-links.txt)
+    foreach ($ln in @(Read-FileLines ($vl + ':\' + $extList))) {
+      $a = $ln.Split('|'); if ($a.Count -eq 2) { $inVault += ($a[0].TrimEnd('\') + '\') }
+    }
     foreach ($ln in (Read-FileLines $cwdFile)) {
       $parts = $ln -split "`t", 2
       if ($parts.Count -eq 2) { $cwdCache[$parts[0]] = $parts[1] }
@@ -332,16 +345,20 @@ function Get-SessionRows([bool]$includeAll) {
       $label = $label -replace "[`t`r`n]", ' '
       [void]$newLines.AppendLine($item.RefPath + "`t" + $ck + "`t" + $label)
     }
-    $lk = '  '
+    $ic = ''
     if ($vl) {
+      $ic = '  '
+      foreach ($pre in $encRoots) { if ($item.RefPath -like ($pre + '*')) { $ic = '🔒'; break } }
       if ($cwdCache.ContainsKey($item.RefPath)) { $cw = $cwdCache[$item.RefPath] }
       else {
         $cw = (Get-SessionCwd $item) -replace "[`t`r`n]", ' '
         if ($cw) { [void]$cwdNew.AppendLine($item.RefPath + "`t" + $cw) }
       }
-      if ($cw) { foreach ($pre in $inVault) { if (($cw + '\') -like ($pre + '*')) { $lk = '🔒'; break } } }
+      $pf = '  '
+      if ($cw) { foreach ($pre in $inVault) { if (($cw.TrimEnd('\') + '\') -like ($pre + '*')) { $pf = '📁'; break } } }
+      $ic = $ic + $pf + ' '
     }
-    $rows += ($item.Path + "`t" + $lk + ' ' + $item.Tag + "`t" + $dt + "`t" + $sz + "`t" + $label)
+    $rows += ($item.Path + "`t" + $ic + $item.Tag + "`t" + $dt + "`t" + $sz + "`t" + $label)
   }
   if ($newLines.Length -gt 0) {
     try {
@@ -941,10 +958,10 @@ function Invoke-VaultSetup {
     $env:CLAUDE_CONFIG_DIR = $cfg
   }
   # cache ชื่อ session ต้องอยู่ในวอลต์ด้วย
-  $oldCache = Join-Path $env:LOCALAPPDATA 'ccrm-labels.tsv'
+  $oldCache = Join-Path $env:LOCALAPPDATA 'ccrm-labels2.tsv'
   if (Test-Path -LiteralPath $oldCache) {
     New-Item -ItemType Directory -Force -Path (Join-Path $cfg '.ccrm') | Out-Null
-    Move-Item -LiteralPath $oldCache -Destination (Join-Path $cfg '.ccrm\labels.tsv') -Force
+    Move-Item -LiteralPath $oldCache -Destination (Join-Path $cfg '.ccrm\labels2.tsv') -Force
   }
   Install-VaultWrappers
   Set-SleepTask $true
@@ -990,7 +1007,7 @@ if ($ListOnly) {
 if ($PreviewLine) {
   $fields = $Line -split "`t"
   $sPath = $fields[0]
-  $tag = $fields[1].Replace('🔒', '').Trim()
+  $tag = ($fields[1] -replace '[^a-z]', '')
   if ($tag -eq 'kimi') {
     $wirePath = Join-Path $sPath 'agents\main\wire.jsonl'
     $lines = Read-FileLines $wirePath
@@ -1105,7 +1122,7 @@ $refreshBind = 'ctrl-a:reload(' + $psBase + ' -ListOnly)'
 # fzf บน Windows ไม่มี become — execute แล้ว abort แทน
 # >CON — output ของ lock ห้ามไหลไปเป็นผลลัพธ์ของ fzf (จะกลายเป็นชื่อ session ที่ไป resume)
 $lockBind = if ($lockNote) { @('--bind', ('ctrl-l:execute(' + $psBase + ' lock >CON)+abort')) } else { @() }
-$picked = $rows | fzf --multi --delimiter "`t" --with-nth 2.. --header $header --preview $previewCmd --preview-window hidden --bind $tabBind --bind $refreshBind @lockBind
+$picked = $rows | fzf --multi --delimiter "`t" --with-nth 2.. --header $header --preview $previewCmd --preview-window hidden --tabstop 1 --bind $tabBind --bind $refreshBind @lockBind
 
 if (-not $picked) {
   # Ctrl-L ล็อกแล้ว fzf ล้างจอทิ้ง — บอกผลอีกที
@@ -1115,7 +1132,7 @@ if (-not $picked) {
 
 $fields = $picked -split "`t"
 $spath = $fields[0]
-$tag = $fields[1].Replace('🔒', '').Trim()
+$tag = ($fields[1] -replace '[^a-z]', '')
 
 switch ($tag) {
   'codex' {
