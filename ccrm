@@ -920,8 +920,30 @@ _project_move() {
     _say "      ${_c_d}ใช้ $c ครั้ง ·$_c_0 $txt"
   done <<< "$list"
   _ask_y_num() { local a; printf '  %s│%s\n  %s│%s  %s%s%s' "$_c_c" "$_c_0" "$_c_c" "$_c_0" "$_c_y" "$1" "$_c_0" > /dev/tty; read -r a < /dev/tty; printf '%s' "$a"; }
-  pick=$(_ask_y_num "เลือกเลขโฟลเดอร์ (Enter เฉยๆ = ยกเลิก): ")
-  [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= n )) || { _say "ยกเลิก — ไม่ได้แตะอะไร"; return 1; }
+  pick=$(_ask_y_num "เลือกเลข เช่น 4 · 4,5 · 4-5 · a = ทุกอันที่ย้ายได้ (Enter เฉยๆ = ยกเลิก): ")
+  # แปลงคำตอบเป็นรายการเลข
+  local nums="" tok a b k
+  pick=$(printf '%s' "$pick" | tr ',' ' ')
+  if [[ "$pick" =~ ^[[:space:]]*([Aa]|all|ทั้งหมด)[[:space:]]*$ ]]; then
+    for ((k = 1; k <= n; k++)); do [[ "${states[$k]}" == ok ]] && nums="$nums $k"; done
+    [[ -n "$nums" ]] || { _say "ไม่มีโฟลเดอร์ที่ย้ายเข้าได้ในรายการนี้"; return 1; }
+  else
+    for tok in $pick; do
+      if [[ "$tok" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        a=${BASH_REMATCH[1]}; b=${BASH_REMATCH[2]}
+        for ((k = a; k <= b; k++)); do nums="$nums $k"; done
+      elif [[ "$tok" =~ ^[0-9]+$ ]]; then nums="$nums $tok"
+      else _say "ไม่เข้าใจ \"$tok\" — ยกเลิก ไม่ได้แตะอะไร"; return 1
+      fi
+    done
+  fi
+  for k in $nums; do (( k >= 1 && k <= n )) || { _say "ไม่มีเลข $k — ยกเลิก ไม่ได้แตะอะไร"; return 1; }; done
+  [[ -n "$nums" ]] || { _say "ยกเลิก — ไม่ได้แตะอะไร"; return 1; }
+  nums=$(printf '%s\n' $nums | awk '!seen[$0]++' | tr '\n' ' ')
+  if [[ "$(printf '%s\n' $nums | wc -l | tr -d ' ')" -gt 1 ]]; then
+    _project_batch "$nums"; return $?
+  fi
+  pick=${nums// /}
   d="${sel[$pick]}"
   _say ""
   case "${states[$pick]}" in
@@ -933,14 +955,53 @@ _project_move() {
   _project_in "$d"
 }
 
+# เลือกหลายอัน — ย้ายเข้าเฉพาะที่ย้ายได้ สรุปรวมแล้วยืนยันครั้งเดียว (ย้ายคืนต้องเลือกทีละอัน)
+_project_batch() {
+  local k d go="" ok_n=0 done_n=0
+  _say ""
+  _say "${_c_b}ย้ายโฟลเดอร์โปรเจกต์เข้าวอลต์ (เข้ารหัส) — หลายโฟลเดอร์$_c_0"
+  _say ""
+  for k in $1; do
+    d="${sel[$k]}"
+    case "${states[$k]}" in
+      ok)
+        if _project_in "$d" check; then go="$go $k"; ok_n=$((ok_n + 1)); fi ;;
+      out)  _say " • ${_c_d}${d/#$HOME/~} — ย้ายเข้าแล้ว ข้าม (ย้ายคืนให้เลือกทีละอัน)$_c_0" ;;
+      in)   _say " • ${_c_d}${d/#$HOME/~} — อยู่ในวอลต์อยู่แล้ว ข้าม$_c_0" ;;
+      deny) _say " • ${_c_r}${d/#$HOME/~} — ⛔ โฟลเดอร์ใหญ่/ระบบ ข้าม$_c_0" ;;
+      gone) _say " • ${_c_d}${d/#$HOME/~} — ไม่มีแล้ว ข้าม$_c_0" ;;
+    esac
+  done
+  (( ok_n > 0 )) || { _say ""; _say "ไม่มีโฟลเดอร์ที่ย้ายได้ — ไม่ได้แตะอะไร"; return 1; }
+  _say ""
+  _say "  ผลลัพธ์ (ทุกโฟลเดอร์ข้างบน):"
+  _say "   • ที่เดิมกลายเป็นลิงก์ชี้เข้าวอลต์ — path เดิมใช้ได้เหมือนเดิม (VS Code, terminal, resume แชท)"
+  _say "   • ตอนล็อก เปิดโฟลเดอร์พวกนี้ไม่ได้ (Finder / VS Code / AI ทุกตัว)"
+  _say "   • ของเดิมเก็บสำรองไว้ที่ ~/.ccrm-plain-backup (ไม่เข้ารหัส) จนกว่าจะสั่ง ccrm lock-cleanup"
+  _say "   • ลืมรหัส + lock-reset = โค้ดพวกนี้เปิดไม่ได้ด้วย (ถ้ายังไม่ cleanup ยังกู้จากสำรองได้)"
+  _say "  ย้ายคืนได้ทีละโฟลเดอร์: กด Ctrl-E แล้วเลือกโฟลเดอร์ที่ขึ้นว่า \"ย้ายคืนได้\""
+  _ask_y "ย้ายทั้ง $ok_n โฟลเดอร์เลยไหม? พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): " || { _say "ยกเลิก — ไม่ได้แตะอะไร"; return 1; }
+  for k in $go; do
+    d="${sel[$k]}"
+    # ย้ายตัวแม่ไปแล้ว ตัวลูกจะกลายเป็นอยู่ในวอลต์ — เช็คสถานะใหม่ก่อนทุกอัน
+    [[ "$(_proj_state "$d")" == ok ]] || { _say " • ${_c_d}${d/#$HOME/~} — ย้ายไปพร้อมโฟลเดอร์แม่แล้ว$_c_0"; done_n=$((done_n + 1)); continue; }
+    _say ""
+    _say "${_c_b}${d/#$HOME/~}$_c_0"
+    _project_in "$d" go && done_n=$((done_n + 1))
+  done
+  _say ""
+  if (( done_n == ok_n )); then _say "${_c_g}✓ เสร็จครบ $done_n โฟลเดอร์$_c_0"; else _say "${_c_y}⚠ สำเร็จ $done_n จาก $ok_n โฟลเดอร์ (ดูข้อความข้างบน)$_c_0"; fi
+}
+
 # ย้ายโฟลเดอร์ $1 เข้าวอลต์ (ผ่านการเช็ค _proj_state = ok แล้ว)
+# $2 mode: ว่าง = ถามเอง (เลือกอันเดียว) · check = ตรวจ+โชว์สรุปบรรทัดเดียว ไม่ย้าย · go = ย้ายเลยไม่ถาม (ยืนยันรวมแล้ว)
 _project_in() {
-  local cw="$1" p
+  local cw="$1" mode="${2:-}" p
   [[ -L "$cw" ]] && { _say "$cw เป็นลิงก์ไปที่อื่น — ย้ายโฟลเดอร์ปลายทางเองแทน"; return 1; }
   p=$(cd -P "$cw" 2>/dev/null && pwd)
   local m found="" sig n kb vfree name dst bk busy
   for m in $_proj_markers; do [[ -e "$p/$m" ]] && { found="$m"; break; }; done
-  _say "กำลังตรวจขนาด ..."
+  [[ -z "$mode" ]] && _say "กำลังตรวจขนาด ..."
   sig=$(_tree_sig "$p"); n="${sig%% *}"
   kb=$(du -sk "$p" 2>/dev/null | cut -f1)
   vfree=$(df -k "$vault_mp" | awk 'NR==2 {print $4}')
@@ -954,6 +1015,13 @@ _project_in() {
   name=$(basename "$p"); dst="$proj_dir/$name"; m=2
   while [[ -e "$dst" ]]; do dst="$proj_dir/$name-$m"; m=$((m + 1)); done
   bk="$HOME/.ccrm-plain-backup/project-$name.$(date +%Y%m%d-%H%M%S)"
+  if [[ "$mode" == check ]]; then
+    _say " • ${p/#$HOME/~}  →  ${dst/#$HOME/~}   ${_c_d}($(du -sh "$p" 2>/dev/null | cut -f1), $n ไฟล์)$_c_0"
+    [[ -n "$found" ]] || _say "   ${_c_y}⚠ ไม่เจอไฟล์ที่บอกว่าเป็นโปรเจกต์ (.git, package.json ฯลฯ)$_c_0"
+    (( kb > 5242880 )) && _say "   ${_c_y}⚠ ใหญ่เกิน 5 GB — ใช้เวลาคัดลอกนาน$_c_0"
+    return 0
+  fi
+  if [[ "$mode" != go ]]; then
   _say "${_c_b}ย้ายโฟลเดอร์โปรเจกต์เข้าวอลต์ (เข้ารหัส)$_c_0"
   _say ""
   _say "  จาก:  ${p/#$HOME/~}   ($(du -sh "$p" 2>/dev/null | cut -f1), $n ไฟล์)"
@@ -970,6 +1038,7 @@ _project_in() {
   _ask_y "ย้ายเลยไหม? พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): " || { _say "ยกเลิก — ไม่ได้แตะอะไร"; return 1; }
   if [[ -z "$found" ]]; then
     _ask_y "ยืนยันอีกครั้ง (ไม่เจอไฟล์โปรเจกต์) พิมพ์ y: " || { _say "ยกเลิก — ไม่ได้แตะอะไร"; return 1; }
+  fi
   fi
   mkdir -p "$proj_dir" "$HOME/.ccrm-plain-backup"; chmod 700 "$HOME/.ccrm-plain-backup"
   _say "คัดลอก ..."
