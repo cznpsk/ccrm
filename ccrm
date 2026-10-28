@@ -879,11 +879,20 @@ _ask_y() { local a; printf '  %s│%s\n  %s│%s  %s%s%s' "$_c_c" "$_c_0" "$_c_c
 
 # $1 = path จากแถว (ไฟล์แชท / โฟลเดอร์ kimi) $2 = ช่อง tag (มีไอคอนปน)
 # สถานะของโฟลเดอร์หนึ่งอัน: out=ย้ายคืนได้ in=อยู่ในวอลต์แล้ว deny gone ok
+# ลิงก์ $1 → ปลายทาง $2 ย้ายคืนได้ไหม: ปลายทางในวอลต์ และ (อยู่ใน projects-code หรือจดคู่นี้ไว้ใน projects.tsv)
+# ลิงก์ที่ผู้ใช้ทำเองแล้วไม่ได้จด (เช่น Manga-Upload → ws-projects) ไม่แตะ
+_proj_restorable() {
+  local p="$1" dst="$2"
+  [[ "$dst" == "$vault_mp/"* && -d "$dst" ]] || return 1
+  [[ "$dst" == "$proj_dir/"* ]] && return 0
+  [[ -f "$proj_list" ]] && grep -qxF "$p"$'\t'"$dst" "$proj_list"
+}
+
 _proj_state() {
   local d="$1" rp
   [[ -e "$d" || -L "$d" ]] || { echo gone; return; }
   rp=$(cd -P "$d" 2>/dev/null && pwd)
-  if [[ -L "$d" && "$rp" == "$proj_dir/"* ]]; then echo out; return; fi
+  if [[ -L "$d" ]] && _proj_restorable "$d" "$(readlink "$d")"; then echo out; return; fi
   if [[ "$rp" == "$vault_mp" || "$rp" == "$vault_mp/"* ]]; then echo in; return; fi
   if _proj_denied "$rp"; then echo deny; return; fi
   echo ok
@@ -1059,7 +1068,7 @@ _project_out() {
   vault_mounted || { _say "ปลดล็อกวอลต์ก่อน"; return 1; }
   [[ -L "$p" ]] || { _say "${p/#$HOME/~} ไม่ได้เป็นลิงก์เข้าวอลต์ — ไม่มีอะไรต้องย้ายคืน"; return 1; }
   dst=$(readlink "$p")
-  [[ "$dst" == "$proj_dir/"* && -d "$dst" ]] || { _say "${p/#$HOME/~} ไม่ได้ชี้เข้า ${proj_dir/#$HOME/~} — ไม่แตะ"; return 1; }
+  _proj_restorable "$p" "$dst" || { _say "${p/#$HOME/~} ไม่ได้ย้ายเข้าผ่าน ccrm (ไม่มีในทะเบียน) — ไม่แตะ"; return 1; }
   busy=$(_proj_busy "$dst")
   if [[ -n "$busy" ]]; then
     _say "${_c_r}⛔ มีโปรแกรมเปิดไฟล์/อยู่ในโฟลเดอร์นี้ — ปิดหรือ cd ออกก่อน:"; _proc_list "$busy" | while IFS= read -r l; do _say "   $_c_d$l"; done; return 1
