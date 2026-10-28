@@ -692,9 +692,19 @@ function Invoke-VaultSetup {
   if ($env:CLAUDECODE) { Write-Host 'รันจาก terminal ปกติ — ห้ามรันจากใน Claude Code (มันเปิดไฟล์ที่ต้องย้ายอยู่)'; return }
   $ai = @(Get-AiProcs)
   if ($ai.Count -gt 0) {
-    Write-Host 'ปิด AI CLI ทุกตัวก่อน (claude/codex/kimi/gemini) แล้วรันใหม่:'
+    Write-Host 'AI CLI ยังเปิดอยู่ (ต้องปิดก่อน ไม่งั้นย้ายไฟล์ที่มันเปิดค้างไม่ได้):'
     $ai | ForEach-Object { Write-Host ("  {0} {1}" -f $_.Id, $_.ProcessName) }
-    return
+    $ans = Read-Host 'ให้ปิดโปรแกรมพวกนี้ให้เลยไหม? (แชทไม่หาย resume ต่อได้) พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก)'
+    if ($ans -notmatch '^[Yy]') { Write-Host 'ยกเลิก — ปิดเองแล้วรัน ccrm lock-setup ใหม่'; return }
+    $ai | Stop-Process -Force -ErrorAction SilentlyContinue
+    $left = @()
+    for ($i = 0; $i -lt 10; $i++) { $left = @(Get-AiProcs); if ($left.Count -eq 0) { break }; Start-Sleep -Milliseconds 500 }
+    if ($left.Count -gt 0) {
+      Write-Host 'ยังปิดไม่หมด:'
+      $left | ForEach-Object { Write-Host ("  {0} {1}" -f $_.Id, $_.ProcessName) }
+      Write-Host 'ปิดเองแล้วรัน ccrm lock-setup ใหม่'; return
+    }
+    Write-Host '  ✓ ปิดแล้ว'
   }
   if (-not (Install-VeraCrypt)) { return }
   $letter = $null
@@ -843,7 +853,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 29
+$ver = 30
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null

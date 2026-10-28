@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=29
+ver=30
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -373,7 +373,20 @@ _vault_setup() {
   fi
   local running; running=$(_ai_running)
   if [[ -n "$running" ]]; then
-    echo "ปิด AI CLI ทุกตัวก่อน (claude/codex/kimi/gemini) แล้วรันใหม่:"; _proc_list "$running"; return 1
+    local ans p left
+    echo "AI CLI ยังเปิดอยู่ (ต้องปิดก่อน ไม่งั้นย้ายไฟล์ที่มันเปิดค้างไม่ได้):"; _proc_list "$running"
+    printf 'ให้ปิดโปรแกรมพวกนี้ให้เลยไหม? (แชทไม่หาย resume ต่อได้) พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): '
+    read -r ans < /dev/tty
+    [[ "$ans" =~ ^[Yy] ]] || { echo "ยกเลิก — ปิดเองแล้วรัน ccrm lock-setup ใหม่"; return 1; }
+    kill -TERM $running 2>/dev/null
+    for p in 1 2 3 4 5 6 7 8 9 10; do
+      left=$(_ai_running); [[ -z "$left" ]] && break
+      sleep 0.5
+    done
+    if [[ -n "$left" ]]; then
+      echo "ยังปิดไม่หมด:"; _proc_list "$left"; echo "ปิดเองแล้วรัน ccrm lock-setup ใหม่"; return 1
+    fi
+    echo "  ✓ ปิดแล้ว"
   fi
   local yn pw pw2
   if vault_configured; then
