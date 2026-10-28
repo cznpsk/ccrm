@@ -389,6 +389,10 @@ _vault_status() {
   if vault_mounted; then echo "🔓 ปลดล็อกอยู่"; else echo "🔒 ล็อกอยู่"; fi
   [[ -f "$sleep_plist" ]] && echo "ล็อกอัตโนมัติตอน sleep: เปิด" || echo "ล็อกอัตโนมัติตอน sleep: ปิด (ccrm lock-auto on)"
   [[ -f "$lid_plist" ]] && echo "ล็อกอัตโนมัติตอนพับจอ: เปิด" || echo "ล็อกอัตโนมัติตอนพับจอ: ปิด (ccrm lock-auto on)"
+  if vault_mounted && [[ -s "$vault_mp/.ccrm/projects.tsv" ]]; then
+    echo "📁 โปรเจกต์ที่อยู่ในวอลต์:"
+    while IFS=$'\t' read -r a b; do echo "   ${a/#$HOME/~}  →  ${b/#$HOME/~}"; done < "$vault_mp/.ccrm/projects.tsv"
+  fi
   [[ -d "$HOME/.ccrm-plain-backup" ]] && echo "⚠ มีข้อมูลเดิมแบบไม่เข้ารหัสค้างที่ ~/.ccrm-plain-backup — ใช้งานได้ปกติแล้วสั่ง ccrm lock-cleanup"
   return 0
 }
@@ -453,6 +457,7 @@ _vault_reset() {
   echo "  ไม่ลบทิ้ง — เปลี่ยนชื่อเก็บไว้ที่ ~${old#"$HOME"} (นึกรหัสออกยังเปิดได้)"
   [[ -d "$HOME/.ccrm-plain-backup" ]] && echo "  มีสำเนาเดิมแบบไม่เข้ารหัสอยู่ที่ ~/.ccrm-plain-backup — กู้บางส่วนจากตรงนั้นได้ (อย่าเพิ่งสั่ง lock-cleanup)"
   echo "  หลังรีเซ็ตต้องล็อกอิน CLI ทุกตัวใหม่"
+  [[ -d "$vault_mp/projects-code" ]] && echo "  ⚠ โฟลเดอร์โปรเจกต์ที่ย้ายเข้าวอลต์ไว้ (ccrm lock-status) จะเปิดไม่ได้ด้วย"
   printf 'ยืนยัน พิมพ์ รีเซ็ต (หรือ reset) แล้วกด Enter: '; read -r ans < /dev/tty
   [[ "$ans" == "รีเซ็ต" || "$ans" == reset ]] || { echo "ยกเลิก — ไม่ได้แตะอะไร"; return 1; }
   if vault_mounted; then
@@ -768,8 +773,8 @@ _list() {
       fi
       # ดูปลายทางจริง — โปรเจกต์ที่ย้ายเข้าวอลต์แล้วทิ้ง symlink ไว้ที่เดิมก็นับ
       rp=""; [[ -n "$cw" && -d "$cw" ]] && rp=$(cd -P "$cw" 2>/dev/null && pwd)
-      if [[ "$rp" == "$vault_mp" || "$rp" == "$vault_mp/"* ]]; then ic="$ic📁"; else ic="$ic  "; fi
-      ic="$ic "
+      if [[ "$rp" == "$vault_mp" || "$rp" == "$vault_mp/"* ]]; then ic="${ic}📁"; else ic="${ic}  "; fi
+      ic="${ic} "
     fi
     sz=$(du -sh "$out" 2>/dev/null | cut -f1)
     dt=$(_mtime_fmt "$f")
@@ -786,6 +791,155 @@ if [[ "${1:-}" == "--list" ]]; then
   _list "${2:-}"
   exit 0
 fi
+
+# ---------- ย้ายโฟลเดอร์โปรเจกต์เข้า/ออกวอลต์ (Ctrl-E) ----------
+# เข้า: copy เข้า ~/.claude/projects-code/<ชื่อ> → เทียบ → ของเดิมไปสำรอง → ที่เดิมเป็น symlink (path เดิมใช้ต่อได้)
+# ออก: ลบ symlink → copy กลับ → เทียบ → ลบในวอลต์
+proj_dir="$vault_mp/projects-code"
+proj_list="$vault_mp/.ccrm/projects.tsv"   # path เดิม<TAB>ที่อยู่ในวอลต์
+
+_proj_markers=".git package.json composer.json pyproject.toml requirements.txt setup.py go.mod Cargo.toml pom.xml build.gradle Gemfile pubspec.yaml deno.json Makefile CMakeLists.txt CLAUDE.md AGENTS.md .claude next.config.js vite.config.ts tsconfig.json"
+
+# โฟลเดอร์ใหญ่/ของระบบ — ห้ามย้ายทั้งก้อน (ย้ายได้แค่โฟลเดอร์ย่อยที่เป็นโปรเจกต์)
+_proj_denied() {
+  local p="$1" d
+  for d in / /Users /Users/Shared /Volumes /Applications /System /Library /private /private/tmp /private/var /tmp /var /usr /opt /bin /sbin /etc /cores \
+           "$HOME" "$HOME/Desktop" "$HOME/Documents" "$HOME/Downloads" "$HOME/Pictures" "$HOME/Music" "$HOME/Movies" \
+           "$HOME/Public" "$HOME/Library" "$HOME/Applications" "$HOME/Sites" "$HOME/Dropbox" "$HOME/Google Drive" "$HOME/OneDrive"; do
+    [[ "$p" == "$d" ]] && return 0
+  done
+  [[ "$p" == /Volumes/* && "${p#/Volumes/}" != */* ]] && return 0   # รากดิสก์ภายนอก
+  [[ "$p" == "$HOME/Library/"* ]] && return 0                       # ~/Library ทั้งหมด (iCloud ฯลฯ)
+  [[ "$p" == "$HOME/."* ]] && return 0                              # โฟลเดอร์ซ่อนใน home (.ssh .config ...)
+  # ครอบของสำคัญไว้ข้างใน (home, วอลต์)
+  [[ "$HOME/" == "$p/"* || "$vault_mp/" == "$p/"* ]] && return 0
+  return 1
+}
+
+_proj_busy() {
+  local p="$1" me="$$ $PPID $(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d ' ')" pid out=""
+  for pid in $(lsof -t +D "$p" 2>/dev/null | sort -u); do
+    [[ " $me " == *" $pid "* ]] && continue
+    out="$out $pid"
+  done
+  echo "$out"
+}
+
+_proj_record() {   # $1=add|del $2=path เดิม $3=ปลายทาง
+  mkdir -p "$(dirname "$proj_list")"; touch "$proj_list"
+  grep -vF "$2"$'\t' "$proj_list" > "$proj_list.tmp"; mv "$proj_list.tmp" "$proj_list"
+  [[ "$1" == add ]] && printf '%s\t%s\n' "$2" "$3" >> "$proj_list"
+  return 0
+}
+
+_ask_y() { local a; printf '%s' "$1" > /dev/tty; read -r a < /dev/tty; [[ "$a" =~ ^[Yy] ]]; }
+
+# $1 = path จากแถว (ไฟล์แชท / โฟลเดอร์ kimi) $2 = ช่อง tag (มีไอคอนปน)
+_project_move() {
+  local f="$1" tag cw p rp
+  tag=$(printf '%s' "$2" | LC_ALL=C tr -dc 'a-z')
+  [[ "$tag" == kimi ]] && f="$f/state.json"
+  echo ""
+  if ! vault_configured || ! vault_mounted; then echo "ต้องตั้งค่าล็อกและปลดล็อกอยู่ก่อน (ccrm lock-setup / ccrm unlock)"; return 1; fi
+  cw=$(_cwd_of "$f" "$tag")
+  [[ -n "$cw" ]] || { echo "แชทนี้ไม่ได้บันทึกโฟลเดอร์ที่ทำงานไว้ — ย้ายไม่ได้"; return 1; }
+  [[ -e "$cw" || -L "$cw" ]] || { echo "ไม่พบโฟลเดอร์ $cw (ถูกลบหรือย้ายไปแล้ว)"; return 1; }
+  rp=$(cd -P "$cw" 2>/dev/null && pwd)
+  if [[ -L "$cw" && ( "$rp" == "$proj_dir/"* ) ]]; then
+    _project_out "$cw"; return $?
+  fi
+  [[ "$rp" == "$vault_mp" || "$rp" == "$vault_mp/"* ]] && { echo "โฟลเดอร์นี้อยู่ในวอลต์อยู่แล้ว ($rp)"; return 1; }
+  [[ -L "$cw" ]] && { echo "$cw เป็นลิงก์ไปที่อื่น ($rp) — ย้ายโฟลเดอร์ปลายทางเองแทน"; return 1; }
+  p="$rp"
+  if _proj_denied "$p"; then
+    echo "⛔ ไม่ย้าย: ${p/#$HOME/~} เป็นโฟลเดอร์ใหญ่/โฟลเดอร์ระบบ (ย้ายได้แค่โฟลเดอร์โปรเจกต์)"
+    echo "   แชทที่ทำงานในโฟลเดอร์นี้ ให้เริ่มแชทใหม่จากในโฟลเดอร์โปรเจกต์แทน"
+    return 1
+  fi
+  local m found="" sig n kb vfree name dst bk busy
+  for m in $_proj_markers; do [[ -e "$p/$m" ]] && { found="$m"; break; }; done
+  echo "กำลังตรวจขนาด ..."
+  sig=$(_tree_sig "$p"); n="${sig%% *}"
+  kb=$(du -sk "$p" 2>/dev/null | cut -f1)
+  vfree=$(df -k "$vault_mp" | awk 'NR==2 {print $4}')
+  if (( kb + 524288 > vfree )); then
+    echo "⛔ ที่ว่างในวอลต์ไม่พอ: ต้องใช้ $(( kb / 1024 )) MB แต่ว่าง $(( vfree / 1024 )) MB (ต้องเหลือเผื่อ 512 MB)"; return 1
+  fi
+  busy=$(_proj_busy "$p")
+  if [[ -n "$busy" ]]; then
+    echo "⛔ มีโปรแกรมเปิดไฟล์/อยู่ในโฟลเดอร์นี้ — ปิดหรือ cd ออกก่อน:"; _proc_list "$busy" | sed 's/^/   /'; return 1
+  fi
+  name=$(basename "$p"); dst="$proj_dir/$name"; m=2
+  while [[ -e "$dst" ]]; do dst="$proj_dir/$name-$m"; m=$((m + 1)); done
+  bk="$HOME/.ccrm-plain-backup/project-$name.$(date +%Y%m%d-%H%M%S)"
+  echo ""
+  echo "📁 ย้ายโฟลเดอร์โปรเจกต์เข้าวอลต์ (เข้ารหัส)"
+  echo "  จาก:  ${p/#$HOME/~}   ($(du -sh "$p" 2>/dev/null | cut -f1), $n ไฟล์)"
+  echo "  ไป:   ${dst/#$HOME/~}   (ในวอลต์)"
+  [[ -n "$found" ]] || echo "  ⚠ ไม่เจอไฟล์ที่บอกว่าเป็นโปรเจกต์ (.git, package.json ฯลฯ) — แน่ใจนะว่าเป็นโฟลเดอร์โปรเจกต์"
+  (( kb > 5242880 )) && echo "  ⚠ ใหญ่เกิน 5 GB — ใช้เวลาคัดลอกนาน"
+  echo "  ผลลัพธ์:"
+  echo "   • ที่เดิม (${p/#$HOME/~}) กลายเป็นลิงก์ชี้เข้าวอลต์ — path เดิมใช้ได้เหมือนเดิม (VS Code, terminal, resume แชท)"
+  echo "   • ตอนล็อก เปิดโฟลเดอร์นี้ไม่ได้ (Finder / VS Code / AI ทุกตัว)"
+  echo "   • แถวแชทที่ใช้โฟลเดอร์นี้จะขึ้น 🔒📁"
+  echo "   • ของเดิมเก็บสำรองไว้ที่ ${bk/#$HOME/~} (ไม่เข้ารหัส) จนกว่าจะสั่ง ccrm lock-cleanup"
+  echo "   • ลืมรหัส + lock-reset = โค้ดชุดนี้เปิดไม่ได้ด้วย (ถ้ายังไม่ cleanup ยังกู้จากสำรองได้)"
+  echo "  ย้ายคืนได้: กด Ctrl-E ที่แถวนี้อีกครั้ง (หรือ ccrm project-out \"${p/#$HOME/~}\")"
+  _ask_y "ย้ายเลยไหม? พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): " || { echo "ยกเลิก — ไม่ได้แตะอะไร"; return 1; }
+  if [[ -z "$found" ]]; then
+    _ask_y "ยืนยันอีกครั้ง (ไม่เจอไฟล์โปรเจกต์) พิมพ์ y: " || { echo "ยกเลิก — ไม่ได้แตะอะไร"; return 1; }
+  fi
+  mkdir -p "$proj_dir" "$HOME/.ccrm-plain-backup"; chmod 700 "$HOME/.ccrm-plain-backup"
+  echo "คัดลอก ..."
+  ditto "$p" "$dst" || { rm -rf "$dst"; echo "✗ คัดลอกไม่สำเร็จ — ของเดิมไม่ถูกแตะ"; return 1; }
+  if [[ "$(_tree_sig "$dst")" != "$sig" ]]; then rm -rf "$dst"; echo "✗ คัดลอกไม่ครบ — ของเดิมไม่ถูกแตะ"; return 1; fi
+  mv "$p" "$bk" || { rm -rf "$dst"; echo "✗ ย้ายของเดิมไปสำรองไม่ได้ — ของเดิมไม่ถูกแตะ"; return 1; }
+  if ! ln -s "$dst" "$p"; then
+    mv "$bk" "$p"; rm -rf "$dst"; echo "✗ สร้างลิงก์ไม่ได้ — คืนของเดิมแล้ว"; return 1
+  fi
+  _proj_record add "$p" "$dst"
+  echo "✓ ย้ายแล้ว — ${p/#$HOME/~} → ${dst/#$HOME/~} ($n ไฟล์)"
+  sleep 1
+}
+
+# ย้ายคืนออกจากวอลต์ ($1 = path เดิมที่ตอนนี้เป็นลิงก์)
+_project_out() {
+  local p="${1%/}" dst sig n busy
+  [[ "$p" == "~/"* ]] && p="$HOME/${p#\~/}"
+  vault_mounted || { echo "ปลดล็อกวอลต์ก่อน"; return 1; }
+  [[ -L "$p" ]] || { echo "${p/#$HOME/~} ไม่ได้เป็นลิงก์เข้าวอลต์ — ไม่มีอะไรต้องย้ายคืน"; return 1; }
+  dst=$(readlink "$p")
+  [[ "$dst" == "$proj_dir/"* && -d "$dst" ]] || { echo "${p/#$HOME/~} ไม่ได้ชี้เข้า ${proj_dir/#$HOME/~} — ไม่แตะ"; return 1; }
+  busy=$(_proj_busy "$dst")
+  if [[ -n "$busy" ]]; then
+    echo "⛔ มีโปรแกรมเปิดไฟล์/อยู่ในโฟลเดอร์นี้ — ปิดหรือ cd ออกก่อน:"; _proc_list "$busy" | sed 's/^/   /'; return 1
+  fi
+  sig=$(_tree_sig "$dst"); n="${sig%% *}"
+  echo ""
+  echo "📂 ย้ายโฟลเดอร์โปรเจกต์ออกจากวอลต์ (กลับไปไม่เข้ารหัส)"
+  echo "  จาก:  ${dst/#$HOME/~}   ($(du -sh "$dst" 2>/dev/null | cut -f1), $n ไฟล์ ในวอลต์)"
+  echo "  ไป:   ${p/#$HOME/~}   (โฟลเดอร์จริงที่เดิม)"
+  echo "  ผลลัพธ์:"
+  echo "   • ไฟล์กลับไปอยู่ที่เดิมแบบไม่เข้ารหัส เปิดได้แม้ตอนล็อก"
+  echo "   • สำเนาในวอลต์ถูกลบหลังคัดลอกครบ"
+  echo "   • แถวแชทจะเหลือแค่ 🔒 (ไม่มี 📁)"
+  echo "  ย้ายเข้าใหม่ได้: กด Ctrl-E อีกครั้ง"
+  _ask_y "ย้ายคืนเลยไหม? พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): " || { echo "ยกเลิก — ไม่ได้แตะอะไร"; return 1; }
+  rm -f "$p"
+  echo "คัดลอก ..."
+  if ! ditto "$dst" "$p" || [[ "$(_tree_sig "$p")" != "$sig" ]]; then
+    rm -rf "$p"; ln -s "$dst" "$p"; echo "✗ คัดลอกกลับไม่ครบ — คืนเป็นลิงก์เหมือนเดิม ข้อมูลในวอลต์ไม่ถูกแตะ"; return 1
+  fi
+  rm -rf "$dst"
+  _proj_record del "$p"
+  echo "✓ ย้ายคืนแล้ว — ${p/#$HOME/~} ($n ไฟล์)"
+  sleep 1
+}
+
+case "${1:-}" in
+  project-move) _project_move "${2:-}" "${3:-}"; exit $? ;;
+  project-out)  _project_out "${2:-}"; exit $? ;;
+esac
 
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 ver_cache="$HOME/.cache/ccrm-latest"
@@ -817,7 +971,8 @@ if vault_configured; then
   lock_note="  |  🔓 Ctrl-L=ล็อก"
   # execute+abort ไม่ใช่ become — become จะเอา output ของ lock ไปเป็นผลลัพธ์ของ fzf แล้วไป resume มั่ว
   # > /dev/tty — output ของ lock ห้ามไหลไปเป็นผลลัพธ์ของ fzf (จะกลายเป็นชื่อ session ที่ไป resume)
-  lock_bind=(--bind "ctrl-l:execute('$0' lock > /dev/tty)+abort")
+  lock_bind=(--bind "ctrl-l:execute('$0' lock > /dev/tty)+abort"
+    --bind "ctrl-e:execute('$0' project-move {1} {2} < /dev/tty > /dev/tty 2>&1)+reload('$0' --list ${1:-})")
 elif _is_mac && [[ ! -f "$HOME/.cache/ccrm-lock-nag-off" ]]; then
   choice=$(printf 'ตั้งค่าเลย (ccrm lock-setup)\nไว้ทีหลัง\nไม่ต้องถามอีก\n' \
     | fzf --header="🔐 ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep" --no-multi --reverse --no-info --height=~6 --prompt='เลือก> ')
@@ -832,6 +987,7 @@ reload_cmd="$0 --list ${1:-}"
 # ส่งผ่าน env ให้ transform-header (sh -c) ไม่ต้องหนีอักขระ
 export CCRM_H1="ccrm v$ver$lock_note$update_note"
 export CCRM_H2="Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก"
+[[ -n "$lock_note" ]] && CCRM_H2="Enter=resume  Ctrl-E=ย้ายโปรเจกต์เข้า/ออกวอลต์ 📁  Tab=ลบ (กด 2 ครั้ง)  Ctrl-A=รีเฟรช  Esc=ยกเลิก"
 
 # stream เข้า fzf ตรงๆ — UI เปิดทันที รายการทยอยขึ้นระหว่างสแกน (|| true กัน SIGPIPE ตอนผู้ใช้เลือกก่อนสแกนจบ)
 picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t' --with-nth=2.. \
