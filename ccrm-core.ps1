@@ -406,25 +406,35 @@ function Invoke-VcDismount([string]$letter) {
 # ให้ทุก junction ชี้ไดรฟ์ปัจจุบัน — adopt = ย้ายโฟลเดอร์จริงที่ยังอยู่ข้างนอกเข้าวอลต์ (ตอน setup)
 # ไดรฟ์ VeraCrypt (NTFS ใหม่) ให้ Users/Authenticated Users เข้าถึงได้ — codex ปฏิเสธ
 # ("socket directory is not private to the current user") ตั้ง ACL ให้เหมือนโฟลเดอร์ใน profile:
-# ตัวเรา + SYSTEM + Administrators เท่านั้น (เช็ค ACL ก่อน ถูกอยู่แล้วไม่ไล่ icacls ทั้งต้น)
-function Set-PrivateAcl([string]$dir) {
+# ตัวเรา + SYSTEM + Administrators ที่ตัวโฟลเดอร์ แล้วให้ไส้ในสืบทอดจากมัน
+# ห้าม icacls /grant (OI)(CI) แบบ /T — ไฟล์รับ flag นั้นไม่ได้ /inheritance:r ทำไปแล้วแต่ grant ไม่ติด
+# ไฟล์เหลือ ACL ว่าง อ่านไม่ได้ทั้ง ccrm และ codex (พลาดใน v35)
+function Set-PrivateAcl([string]$dir, [bool]$repair) {
   $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   $ok = @($me, 'S-1-5-18', 'S-1-5-32-544')
-  try {
-    $bad = @((Get-Acl -LiteralPath $dir).Access | Where-Object {
-        try { $ok -notcontains $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { $true }
-      })
-    if ($bad.Count -eq 0) { return }
-  } catch {}
-  & icacls $dir /inheritance:r /grant:r "*${me}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C /Q | Out-Null
+  if (-not $repair) {
+    try {
+      $bad = @((Get-Acl -LiteralPath $dir).Access | Where-Object {
+          try { $ok -notcontains $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { $true }
+        })
+      if ($bad.Count -eq 0) { return }
+    } catch {}
+  }
+  & icacls $dir /inheritance:r /grant:r "*${me}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q | Out-Null
+  & icacls (Join-Path $dir '*') /reset /T /C /Q 2>$null | Out-Null
 }
 
 # ทุกโฟลเดอร์ของค่ายในวอลต์ (รวมที่เก็บนอกที่ปกติ ext-*)
+# ครั้งแรกบนวอลต์นี้ (ไม่มี marker) รีเซ็ตไส้ในทั้งต้นด้วย — ซ่อมไฟล์ที่ v35 ทำ ACL ว่างไว้
 function Protect-VaultDirs([string]$letter) {
   $root = $letter + ':\'
+  $marker = Join-Path $root '.ccrm-acl2'
+  $repair = -not (Test-Path -LiteralPath $marker)
+  if ($repair) { Write-Host 'กำลังตั้งสิทธิ์ไฟล์ในวอลต์ (ครั้งเดียว อาจใช้เวลาสักครู่) ...' }
   foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue)) {
-    if ($d.Name -in @($vaultLinks.Values) -or $d.Name -like 'ext-*') { Set-PrivateAcl $d.FullName }
+    if ($d.Name -in @($vaultLinks.Values) -or $d.Name -like 'ext-*') { Set-PrivateAcl $d.FullName $repair }
   }
+  if ($repair) { try { [System.IO.File]::WriteAllText($marker, '1') } catch {} }
 }
 
 function Sync-VaultLinks([string]$letter, [bool]$adopt) {
@@ -942,7 +952,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 35
+$ver = 36
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
