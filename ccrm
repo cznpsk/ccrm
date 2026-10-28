@@ -27,6 +27,8 @@ vault_links=".codex:codex-data .kimi-code:kimi-data .gemini:gemini-data .claude.
 # ตัวแปรที่ย้ายที่เก็บไปไว้ที่อื่น : ชื่อปกติใน HOME : ชื่อในวอลต์ : ชื่อแสดง
 vault_ext_vars="CLAUDE_CONFIG_DIR:.claude:ext-claude:Claude CODEX_HOME:.codex:ext-codex:Codex"
 sleep_plist="$HOME/Library/LaunchAgents/com.cznpsk.ccrm-sleeplock.plist"
+# โปรแกรมที่แค่อ่านไฟล์ในวอลต์แวบเดียว (ไม่ใช่ AI) — ล็อกแล้วชนให้ลองซ้ำ ไม่ยอมแพ้ทันที
+transient_readers="IslandAgent"
 lid_plist="$HOME/Library/LaunchAgents/com.cznpsk.ccrm-lidlock.plist"
 # ไฟล์ชั่วคราวของ Claude (task output ฯลฯ) ลบตอนล็อก — ไม่อิง HOME เลยเปิดให้ override ตอนเทสต์
 claude_tmp="${CCRM_CLAUDE_TMP:-/private/tmp/claude-$(id -u)}"
@@ -257,6 +259,18 @@ _vault_lock() {
   if ! hdiutil detach "$vault_mp" -quiet 2>/dev/null; then
     sleep 1
     if ! hdiutil detach "$vault_mp" -quiet 2>/dev/null; then
+      # ตัวอ่านชั่วคราว (เช่น IslandAgent อ่านไฟล์แชทแวบเดียวทุกวินาที) — ขวางแค่จังหวะเดียว ลองซ้ำก่อนยอมแพ้
+      local i n
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        busy=$(_vault_busy)
+        [[ -n "$busy" ]] || { hdiutil detach "$vault_mp" -quiet 2>/dev/null && break; }
+        n=$(_proc_list "$busy" | awk '{print $2}' | xargs -n1 basename 2>/dev/null | grep -vxE "$transient_readers" | wc -l | tr -d ' ')
+        (( n == 0 )) || break
+        sleep 0.5
+        hdiutil detach "$vault_mp" -quiet 2>/dev/null && break
+      done
+    fi
+    if vault_mounted; then
       busy=$(_vault_busy)
       _notify "ยังล็อกไม่ได้ — มีโปรแกรมเปิดไฟล์ในวอลต์อยู่: $(_proc_list "$busy" | awk '{print $2}' | xargs -n1 basename 2>/dev/null | sort -u | tr '\n' ' ')"
       [[ -z "$auto" ]] && echo "(terminal ที่ cd อยู่ใน ~/.claude ก็นับ — cd ออกหรือปิดก่อน)"
@@ -282,6 +296,8 @@ _install_wrappers() {
 }
 
 _lid_closed() { ioreg -r -k AppleClamshellState -d 1 2>/dev/null | grep -q '"AppleClamshellState" = Yes'; }
+# หน้าจอล็อก (Ctrl-Cmd-Q, hot corner, จอดับแล้วต้องใส่รหัส) — macOS ใส่ key นี้ใน IOConsoleUsers ตอนล็อกเท่านั้น
+_screen_locked() { ioreg -n Root -d1 2>/dev/null | grep -q '"CGSSessionScreenIsLocked"=Yes'; }
 
 # พับจอแต่เครื่องไม่ sleep (Owly/caffeinate/ต่อจอนอก) sleepwatcher ไม่ทำงาน — เฝ้าฝาจอเองทุก 3 วิ
 # AI ยังรันอยู่ = ยังไม่ล็อก รอให้ปิดไปเองก่อน (ไม่ตัดงานที่ตั้งใจปล่อยรันตอนพับจอ)
@@ -290,7 +306,8 @@ _lid_watch() {
   local tries=0 next=0 now
   cd / || true
   while sleep 3; do
-    if ! _lid_closed; then tries=0; next=0; continue; fi
+    # พับจอ หรือ ล็อกหน้าจอ — กฎเดียวกัน (AI ยังรัน = รอ)
+    if ! _lid_closed && ! _screen_locked; then tries=0; next=0; continue; fi
     vault_mounted || continue
     [[ -n "$(_ai_running)" ]] && continue
     now=$(date +%s)
@@ -325,7 +342,7 @@ _lid_hook() {
 </plist>
 EOF
   launchctl bootstrap "gui/$(id -u)" "$lid_plist" 2>/dev/null
-  echo "  ✓ ล็อกอัตโนมัติตอนพับจอ (ถ้ายังมี AI รันอยู่ จะรอให้มันปิดเองก่อนค่อยล็อก)"
+  echo "  ✓ ล็อกอัตโนมัติตอนพับจอ/ล็อกหน้าจอ (ถ้ายังมี AI รันอยู่ จะรอให้มันปิดเองก่อนค่อยล็อก)"
 }
 
 # ล็อกอัตโนมัติตอนเครื่อง sleep (ปิดฝา) ผ่าน sleepwatcher + LaunchAgent ของเราเอง (ไม่แตะ ~/.sleep ของผู้ใช้)
@@ -388,7 +405,7 @@ _vault_status() {
   if ! vault_configured; then echo "ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup"; return 0; fi
   if vault_mounted; then echo "🔓 ปลดล็อกอยู่"; else echo "🔒 ล็อกอยู่"; fi
   [[ -f "$sleep_plist" ]] && echo "ล็อกอัตโนมัติตอน sleep: เปิด" || echo "ล็อกอัตโนมัติตอน sleep: ปิด (ccrm lock-auto on)"
-  [[ -f "$lid_plist" ]] && echo "ล็อกอัตโนมัติตอนพับจอ: เปิด" || echo "ล็อกอัตโนมัติตอนพับจอ: ปิด (ccrm lock-auto on)"
+  [[ -f "$lid_plist" ]] && echo "ล็อกอัตโนมัติตอนพับจอ/ล็อกหน้าจอ: เปิด" || echo "ล็อกอัตโนมัติตอนพับจอ/ล็อกหน้าจอ: ปิด (ccrm lock-auto on)"
   if vault_mounted && [[ -s "$vault_mp/.ccrm/projects.tsv" ]]; then
     echo "📁 โปรเจกต์ที่อยู่ในวอลต์:"
     while IFS=$'\t' read -r a b; do echo "   ${a/#$HOME/~}  →  ${b/#$HOME/~}"; done < "$vault_mp/.ccrm/projects.tsv"
