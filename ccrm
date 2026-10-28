@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=39
+ver=40
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -828,7 +828,7 @@ picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t'
     *gemini*) jq -r ".messages[]? | select(.type==\"user\") | .content[]? | select(.text) | .text" "$f" 2>/dev/null ;;
     *) head -c 300000 "$f" | jq -r "select(.type==\"user\" and (.isMeta!=true)) | .message.content | if type==\"string\" then . else ([.[]|select(.type==\"text\")|.text]|join(\" \")) end" 2>/dev/null ;;
   esac | grep -v "^<" | head -30' \
-  --preview-window=right:50%:wrap \
+  --preview-window=hidden \
   --bind "ctrl-a:reload($reload_cmd)" \
   ${lock_bind[@]+"${lock_bind[@]}"} \
   --bind "tab:transform:if [ \"\$FZF_SELECT_COUNT\" -gt 0 ] && [ {+1} = {1} ]; then echo \"execute-silent(rm -rf {1})+reload($reload_cmd)+clear-selection\"; else echo 'clear-selection+toggle'; fi") || {

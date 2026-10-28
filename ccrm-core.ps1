@@ -1033,7 +1033,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 39
+$ver = 40
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
@@ -1105,7 +1105,7 @@ $refreshBind = 'ctrl-a:reload(' + $psBase + ' -ListOnly)'
 # fzf บน Windows ไม่มี become — execute แล้ว abort แทน
 # >CON — output ของ lock ห้ามไหลไปเป็นผลลัพธ์ของ fzf (จะกลายเป็นชื่อ session ที่ไป resume)
 $lockBind = if ($lockNote) { @('--bind', ('ctrl-l:execute(' + $psBase + ' lock >CON)+abort')) } else { @() }
-$picked = $rows | fzf --multi --delimiter "`t" --with-nth 2.. --header $header --preview $previewCmd --preview-window right:50%:wrap --bind $tabBind --bind $refreshBind @lockBind
+$picked = $rows | fzf --multi --delimiter "`t" --with-nth 2.. --header $header --preview $previewCmd --preview-window hidden --bind $tabBind --bind $refreshBind @lockBind
 
 if (-not $picked) {
   # Ctrl-L ล็อกแล้ว fzf ล้างจอทิ้ง — บอกผลอีกที
