@@ -706,24 +706,70 @@ function Show-Pending([string]$title) {
   if (-not $any) { Write-Host '  (ไม่มี — ทุกอย่างอยู่ในวอลต์แล้ว)' }
 }
 
+# AI CLI ที่เปิดค้างถือไฟล์ในวอลต์อยู่ — ถามแล้วปิดให้ ($cmd = ชื่อคำสั่งไว้บอกให้รันใหม่)
+function Close-AiProcs([string]$cmd) {
+  $ai = @(Get-AiProcs)
+  if ($ai.Count -eq 0) { return $true }
+  Write-Host 'AI CLI ยังเปิดอยู่ (ต้องปิดก่อน ไม่งั้นย้ายไฟล์ที่มันเปิดค้างไม่ได้):'
+  $ai | ForEach-Object { Write-Host ("  {0} {1}" -f $_.Id, $_.ProcessName) }
+  $ans = Read-Host 'ให้ปิดโปรแกรมพวกนี้ให้เลยไหม? (แชทไม่หาย resume ต่อได้) พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก)'
+  if ($ans -notmatch '^[Yy]') { Write-Host "ยกเลิก — ปิดเองแล้วรัน ccrm $cmd ใหม่"; return $false }
+  $ai | Stop-Process -Force -ErrorAction SilentlyContinue
+  $left = @()
+  for ($i = 0; $i -lt 10; $i++) { $left = @(Get-AiProcs); if ($left.Count -eq 0) { break }; Start-Sleep -Milliseconds 500 }
+  if ($left.Count -gt 0) {
+    Write-Host 'ยังปิดไม่หมด:'
+    $left | ForEach-Object { Write-Host ("  {0} {1}" -f $_.Id, $_.ProcessName) }
+    Write-Host "ปิดเองแล้วรัน ccrm $cmd ใหม่"; return $false
+  }
+  Write-Host '  ✓ ปิดแล้ว'
+  return $true
+}
+
+# ลืมรหัส — ข้อมูลในวอลต์กู้ไม่ได้ เปลี่ยนชื่อคอนเทนเนอร์เก็บไว้ (นึกรหัสออกยังเปิดได้) แล้วตั้งวอลต์ใหม่
+function Invoke-VaultReset {
+  if (-not (Test-VaultConfigured)) { Write-Host 'ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup'; return }
+  if ($env:CLAUDECODE) { Write-Host 'รันจาก terminal ปกติ — ห้ามรันจากใน Claude Code'; return }
+  if (-not (Close-AiProcs 'lock-reset')) { return }
+  $old = $vaultFile + '.forgotten-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+  Write-Host ''
+  Write-Host '⚠ รีเซ็ตวอลต์ (ลืมรหัสผ่าน)'
+  Write-Host ("  ข้อมูลในวอลต์เดิม ({0}B) จะเปิดไม่ได้อีก: session ประวัติแชท การล็อกอินของ Claude/Codex/Kimi/Gemini" -f (Format-Size (Get-Item -LiteralPath $vaultFile).Length))
+  Write-Host "  ไม่ลบทิ้ง — เปลี่ยนชื่อเก็บไว้ที่ $old (นึกรหัสออกยังเปิดได้)"
+  if (Test-Path -LiteralPath $plainBackup) { Write-Host '  มีสำเนาเดิมแบบไม่เข้ารหัสอยู่ที่ ~\.ccrm-plain-backup — กู้บางส่วนจากตรงนั้นได้ (อย่าเพิ่งสั่ง lock-cleanup)' }
+  Write-Host '  หลังรีเซ็ตต้องล็อกอิน CLI ทุกตัวใหม่'
+  $ans = Read-Host 'ยืนยัน พิมพ์ รีเซ็ต (หรือ reset) แล้วกด Enter'
+  if ($ans -ne 'รีเซ็ต' -and $ans -ne 'reset') { Write-Host 'ยกเลิก — ไม่ได้แตะอะไร'; return }
+  if ((Test-VaultMounted) -and -not (Invoke-VaultLock $true)) { Write-Host 'ล็อกวอลต์ไม่ได้ — ยังไม่รีเซ็ต'; return }
+  try { Rename-Item -LiteralPath $vaultFile -NewName (Split-Path $old -Leaf) -ErrorAction Stop }
+  catch { Write-Host "เปลี่ยนชื่อคอนเทนเนอร์ไม่ได้ — ยกเลิก ($($_.Exception.Message))"; return }
+  # junction ที่ชี้เข้าวอลต์เดิม — ถอดแค่ตัวลิงก์ (ของจริงอยู่ในคอนเทนเนอร์ที่เก็บไว้)
+  foreach ($k in $vaultLinks.Keys) {
+    $p = Join-Path $HOME $k
+    $it = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+    if ($it -and $it.LinkType -eq 'Junction') {
+      # ทิ้งโฟลเดอร์ว่างไว้แทน — setup ย้ายเข้าวอลต์ใหม่ ไม่งั้น CLI จะสร้างข้อมูลไว้ข้างนอก
+      Remove-Junction $p
+      New-Item -ItemType Directory -Force -Path $p | Out-Null
+    }
+  }
+  foreach ($v in $extVars.Keys) {
+    $p = Get-EnvValue $v
+    if (-not $p) { continue }
+    $it = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+    if ($it -and $it.LinkType -eq 'Junction' -and (@($it.Target)[0] -match '^[A-Z]:\\ext-')) {
+      Remove-Junction $p
+      New-Item -ItemType Directory -Force -Path $p | Out-Null
+    }
+  }
+  Write-Host '  ✓ เก็บวอลต์เดิมแล้ว — ตั้งรหัสใหม่ต่อเลย'
+  Write-Host ''
+  Invoke-VaultSetup
+}
+
 function Invoke-VaultSetup {
   if ($env:CLAUDECODE) { Write-Host 'รันจาก terminal ปกติ — ห้ามรันจากใน Claude Code (มันเปิดไฟล์ที่ต้องย้ายอยู่)'; return }
-  $ai = @(Get-AiProcs)
-  if ($ai.Count -gt 0) {
-    Write-Host 'AI CLI ยังเปิดอยู่ (ต้องปิดก่อน ไม่งั้นย้ายไฟล์ที่มันเปิดค้างไม่ได้):'
-    $ai | ForEach-Object { Write-Host ("  {0} {1}" -f $_.Id, $_.ProcessName) }
-    $ans = Read-Host 'ให้ปิดโปรแกรมพวกนี้ให้เลยไหม? (แชทไม่หาย resume ต่อได้) พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก)'
-    if ($ans -notmatch '^[Yy]') { Write-Host 'ยกเลิก — ปิดเองแล้วรัน ccrm lock-setup ใหม่'; return }
-    $ai | Stop-Process -Force -ErrorAction SilentlyContinue
-    $left = @()
-    for ($i = 0; $i -lt 10; $i++) { $left = @(Get-AiProcs); if ($left.Count -eq 0) { break }; Start-Sleep -Milliseconds 500 }
-    if ($left.Count -gt 0) {
-      Write-Host 'ยังปิดไม่หมด:'
-      $left | ForEach-Object { Write-Host ("  {0} {1}" -f $_.Id, $_.ProcessName) }
-      Write-Host 'ปิดเองแล้วรัน ccrm lock-setup ใหม่'; return
-    }
-    Write-Host '  ✓ ปิดแล้ว'
-  }
+  if (-not (Close-AiProcs 'lock-setup')) { return }
   if (-not (Install-VeraCrypt)) { return }
   $letter = $null
   if (Test-VaultConfigured) {
@@ -817,6 +863,7 @@ switch ($Line) {
   'lock-setup'   { Invoke-VaultSetup; exit 0 }
   'lock-status'  { Show-VaultStatus; exit 0 }
   'lock-cleanup' { Invoke-VaultCleanup; exit 0 }
+  'lock-reset'   { Invoke-VaultReset; exit 0 }
   'lock-auto'    { Set-SleepTask ($Sel -ne 'off'); exit 0 }
 }
 
@@ -871,7 +918,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 33
+$ver = 34
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null

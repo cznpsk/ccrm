@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=33
+ver=34
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -417,28 +417,74 @@ _show_pending() {
   [[ -n "$any" ]] || echo "  (ไม่มี — ทุกอย่างอยู่ในวอลต์แล้ว)"
 }
 
+# AI CLI ที่เปิดค้างถือไฟล์ในวอลต์อยู่ — ถามแล้วปิดให้ ($1 = ชื่อคำสั่งไว้บอกให้รันใหม่)
+_close_ai() {
+  local running ans p left
+  running=$(_ai_running)
+  [[ -n "$running" ]] || return 0
+  echo "AI CLI ยังเปิดอยู่ (ต้องปิดก่อน ไม่งั้นย้ายไฟล์ที่มันเปิดค้างไม่ได้):"; _proc_list "$running"
+  printf 'ให้ปิดโปรแกรมพวกนี้ให้เลยไหม? (แชทไม่หาย resume ต่อได้) พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): '
+  read -r ans < /dev/tty
+  [[ "$ans" =~ ^[Yy] ]] || { echo "ยกเลิก — ปิดเองแล้วรัน ccrm $1 ใหม่"; return 1; }
+  kill -TERM $running 2>/dev/null
+  for p in 1 2 3 4 5 6 7 8 9 10; do
+    left=$(_ai_running); [[ -z "$left" ]] && break
+    sleep 0.5
+  done
+  if [[ -n "$left" ]]; then
+    echo "ยังปิดไม่หมด:"; _proc_list "$left"; echo "ปิดเองแล้วรัน ccrm $1 ใหม่"; return 1
+  fi
+  echo "  ✓ ปิดแล้ว"
+}
+
+# ลืมรหัส — ข้อมูลในวอลต์กู้ไม่ได้ เปลี่ยนชื่ออิมเมจเก็บไว้ (นึกรหัสออกยังเปิดได้) แล้วตั้งวอลต์ใหม่
+_vault_reset() {
+  _is_mac || { echo "ใช้ได้แค่ macOS"; return 1; }
+  vault_configured || { echo "ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup"; return 1; }
+  if [[ -n "${CLAUDECODE:-}" ]]; then
+    echo "รันจาก terminal ปกติ — ห้ามรันจากใน Claude Code"; return 1
+  fi
+  _close_ai lock-reset || return 1
+  local old="$vault_img.forgotten-$(date +%Y%m%d-%H%M%S)" ans pair name inner src spec var def label p
+  echo ""
+  echo "⚠ รีเซ็ตวอลต์ (ลืมรหัสผ่าน)"
+  echo "  ข้อมูลในวอลต์เดิม ($(du -sh "$vault_img" 2>/dev/null | awk '{print $1}')) จะเปิดไม่ได้อีก: session ประวัติแชท การล็อกอินของ Claude/Codex/Kimi/Gemini"
+  echo "  และทุกอย่างที่เก็บไว้ใน ~/.claude"
+  echo "  ไม่ลบทิ้ง — เปลี่ยนชื่อเก็บไว้ที่ ~${old#"$HOME"} (นึกรหัสออกยังเปิดได้)"
+  [[ -d "$HOME/.ccrm-plain-backup" ]] && echo "  มีสำเนาเดิมแบบไม่เข้ารหัสอยู่ที่ ~/.ccrm-plain-backup — กู้บางส่วนจากตรงนั้นได้ (อย่าเพิ่งสั่ง lock-cleanup)"
+  echo "  หลังรีเซ็ตต้องล็อกอิน CLI ทุกตัวใหม่"
+  printf 'ยืนยัน พิมพ์ รีเซ็ต (หรือ reset) แล้วกด Enter: '; read -r ans < /dev/tty
+  [[ "$ans" == "รีเซ็ต" || "$ans" == reset ]] || { echo "ยกเลิก — ไม่ได้แตะอะไร"; return 1; }
+  if vault_mounted; then
+    _vault_lock 1 || { echo "ล็อกวอลต์ไม่ได้ — ยังไม่รีเซ็ต"; return 1; }
+  fi
+  mv "$vault_img" "$old" || { echo "เปลี่ยนชื่ออิมเมจไม่ได้ — ยกเลิก"; return 1; }
+  # ลิงก์ที่ชี้เข้าวอลต์เดิม — ถอดออก (ของจริงอยู่ในอิมเมจที่เก็บไว้ ไม่ได้ลบอะไร)
+  for pair in $vault_links; do
+    name="${pair%%:*}"; inner="${pair#*:}"; src="$HOME/$name"
+    if [[ -L "$src" && "$(readlink "$src")" == "$vault_mp/$inner" ]]; then
+      # ทิ้งของว่างไว้แทน — setup ย้ายเข้าวอลต์ใหม่ ไม่งั้น CLI จะสร้างข้อมูลไว้ข้างนอก
+      rm -f "$src"
+      if [[ "$name" == *.json ]]; then echo '{}' > "$src"; else mkdir -p "$src"; fi
+    fi
+  done
+  for spec in $vault_ext_vars; do
+    IFS=: read -r var def inner label <<< "$spec"
+    p="${!var:-}"; p="${p%/}"
+    if [[ -n "$p" && -L "$p" && "$(readlink "$p")" == "$vault_mp/$inner" ]]; then rm -f "$p"; mkdir -p "$p"; fi
+  done
+  chmod 700 "$vault_mp" 2>/dev/null
+  echo "  ✓ เก็บวอลต์เดิมแล้ว — ตั้งรหัสใหม่ต่อเลย"
+  echo ""
+  _vault_setup
+}
+
 _vault_setup() {
   _is_mac || { echo "ตั้งค่าล็อกยังรองรับแค่ macOS (Windows กำลังทำ)"; return 1; }
   if [[ -n "${CLAUDECODE:-}" ]]; then
     echo "รันจาก terminal ปกติ — ห้ามรันจากใน Claude Code (มันเปิดไฟล์ที่ต้องย้ายอยู่)"; return 1
   fi
-  local running; running=$(_ai_running)
-  if [[ -n "$running" ]]; then
-    local ans p left
-    echo "AI CLI ยังเปิดอยู่ (ต้องปิดก่อน ไม่งั้นย้ายไฟล์ที่มันเปิดค้างไม่ได้):"; _proc_list "$running"
-    printf 'ให้ปิดโปรแกรมพวกนี้ให้เลยไหม? (แชทไม่หาย resume ต่อได้) พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): '
-    read -r ans < /dev/tty
-    [[ "$ans" =~ ^[Yy] ]] || { echo "ยกเลิก — ปิดเองแล้วรัน ccrm lock-setup ใหม่"; return 1; }
-    kill -TERM $running 2>/dev/null
-    for p in 1 2 3 4 5 6 7 8 9 10; do
-      left=$(_ai_running); [[ -z "$left" ]] && break
-      sleep 0.5
-    done
-    if [[ -n "$left" ]]; then
-      echo "ยังปิดไม่หมด:"; _proc_list "$left"; echo "ปิดเองแล้วรัน ccrm lock-setup ใหม่"; return 1
-    fi
-    echo "  ✓ ปิดแล้ว"
-  fi
+  _close_ai lock-setup || return 1
   local yn pw pw2
   if vault_configured; then
     echo "เจอวอลต์เดิมในเครื่องแล้ว — ใช้ต่อ (ไม่สร้างใหม่ ข้อมูลในวอลต์ไม่ถูกแตะ)"
@@ -557,6 +603,7 @@ case "${1:-}" in
   lock-setup)  _vault_setup; exit $? ;;
   lock-status) _vault_status; exit $? ;;
   lock-cleanup) _vault_cleanup; exit $? ;;
+  lock-reset)  _vault_reset; exit $? ;;
   lid-watch)   _lid_watch; exit $? ;;
   lock-auto)
     if [[ "${2:-}" == off ]]; then _sleep_hook off; else _sleep_hook on; fi
