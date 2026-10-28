@@ -871,7 +871,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 32
+$ver = 33
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
@@ -909,7 +909,7 @@ if (Test-VaultConfigured) {
     # Enter ที่ค้างจากช่องรหัสจะหลุดเข้า fzf กลายเป็นกด resume — ล้างทิ้งก่อน
     try { $Host.UI.RawUI.FlushInputBuffer() } catch {}
   }
-  $lockNote = '  🔓 Ctrl-L=ล็อก'
+  $lockNote = '  |  🔓 Ctrl-L=ล็อก'
 } elseif (-not (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'ccrm-lock-nag-off')) -and (Get-Command fzf -ErrorAction SilentlyContinue)) {
   $choice = @('ตั้งค่าเลย (ccrm lock-setup)', 'ไว้ทีหลัง', 'ไม่ต้องถามอีก') | fzf --header '🔐 ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep' --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> '
   if ($choice -like 'ตั้งค่า*') { Invoke-VaultSetup; exit 0 }
@@ -930,7 +930,8 @@ if (-not $fzf) {
 
 $scriptPath = $PSCommandPath
 $psBase = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' + $scriptPath + '"'
-$header = "รวม $($rows.Count) sessions  |  ccrm v$ver  |  Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก$lockNote$updateNote"
+# หัว 2 บรรทัด — บรรทัดเดียวยาวเกินช่องรายการ (พรีวิวกินครึ่งจอ) Ctrl-L ตกขอบมองไม่เห็น
+$header = "รวม $($rows.Count) sessions  |  ccrm v$ver$lockNote$updateNote`nEnter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก"
 $previewCmd = $psBase + ' -PreviewLine -Line "{r}"'
 $allFlag = if ($All) { ' -All' } else { '' }
 $tabBind = 'tab:transform:' + $psBase + ' -TabTransform -Sel {+1} -Cur {1}' + $allFlag

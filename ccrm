@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=32
+ver=33
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -726,7 +726,7 @@ if vault_configured; then
     echo "🔒 session ถูกล็อกอยู่ (Enter ว่าง = ออก)"
     _vault_unlock || exit 1
   fi
-  lock_note="  🔓 Ctrl-L=ล็อก"
+  lock_note="  |  🔓 Ctrl-L=ล็อก"
   # execute+abort ไม่ใช่ become — become จะเอา output ของ lock ไปเป็นผลลัพธ์ของ fzf แล้วไป resume มั่ว
   # > /dev/tty — output ของ lock ห้ามไหลไปเป็นผลลัพธ์ของ fzf (จะกลายเป็นชื่อ session ที่ไป resume)
   lock_bind=(--bind "ctrl-l:execute('$0' lock > /dev/tty)+abort")
@@ -740,12 +740,15 @@ elif _is_mac && [[ ! -f "$HOME/.cache/ccrm-lock-nag-off" ]]; then
 fi
 
 reload_cmd="$0 --list ${1:-}"
-hdr="ccrm v$ver  |  Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก$lock_note$update_note"
+# หัว 2 บรรทัด — บรรทัดเดียวยาวเกินช่องรายการ (พรีวิวกินครึ่งจอ) Ctrl-L ตกขอบมองไม่เห็น
+# ส่งผ่าน env ให้ transform-header (sh -c) ไม่ต้องหนีอักขระ
+export CCRM_H1="ccrm v$ver$lock_note$update_note"
+export CCRM_H2="Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก"
 
 # stream เข้า fzf ตรงๆ — UI เปิดทันที รายการทยอยขึ้นระหว่างสแกน (|| true กัน SIGPIPE ตอนผู้ใช้เลือกก่อนสแกนจบ)
 picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t' --with-nth=2.. \
-  --header="กำลังโหลด...  |  $hdr" \
-  --bind "load:transform-header:echo \"รวม \$FZF_TOTAL_COUNT sessions  |  $hdr\"" \
+  --header="กำลังโหลด...  |  $CCRM_H1"$'\n'"$CCRM_H2" \
+  --bind 'load:transform-header:printf "%s\n%s" "รวม $FZF_TOTAL_COUNT sessions  |  $CCRM_H1" "$CCRM_H2"' \
   --preview 'f={1}; case {2} in
     codex*) head -c 500000 "$f" | jq -r "select(.type==\"response_item\" and .payload.role==\"user\") | .payload.content[]? | select(.type==\"input_text\") | .text | select(startswith(\"<\")|not)" 2>/dev/null ;;
     kimi*) jq -r "select(.type==\"turn.prompt\" and .origin.kind==\"user\") | .input[]? | select(.type==\"text\") | .text" "$f/agents/main/wire.jsonl" 2>/dev/null ;;
