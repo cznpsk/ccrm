@@ -419,7 +419,7 @@ function Sync-VaultLinks([string]$letter, [bool]$adopt) {
   # junction ของที่เก็บนอกที่ปกติ — ชี้อักษรไดรฟ์ปัจจุบัน
   $lf = $letter + ':\' + $extList
   if (Test-Path -LiteralPath $lf) {
-    foreach ($ln in @(Get-Content -LiteralPath $lf -Encoding UTF8)) {
+    foreach ($ln in @(Read-FileLines $lf)) {
       $a = $ln.Split('|')
       if ($a.Count -ne 2) { continue }
       $dst = $letter + ':\' + $a[1]
@@ -476,8 +476,8 @@ function Move-ExtDirs([string]$letter) {
       Write-Host "  ✗ สร้าง junction ที่ $src ไม่ได้ คืนของเดิมแล้ว"; continue
     }
     New-Item -ItemType Directory -Force -Path $plainBackup | Out-Null
-    Add-Content -LiteralPath (Join-Path $plainBackup 'ext-backups.txt') -Value $old -Encoding UTF8
-    Add-Content -LiteralPath ($letter + ':\' + $extList) -Value ($src + '|' + $e.Inner) -Encoding UTF8
+    [System.IO.File]::AppendAllText([string](Join-Path $plainBackup 'ext-backups.txt'), $old + "`r`n")
+    [System.IO.File]::AppendAllText($letter + ':\' + $extList, $src + '|' + $e.Inner + "`r`n")
     Write-Host "  ✓ ย้าย $src เข้าวอลต์แล้ว ($($s1.Split(' ')[0]) ไฟล์)"
   }
 }
@@ -731,7 +731,7 @@ function Invoke-VaultCleanup {
   $extBk = Join-Path $plainBackup 'ext-backups.txt'
   $ext = @()
   if (Test-Path -LiteralPath $extBk) {
-    $ext = @(Get-Content -LiteralPath $extBk -Encoding UTF8 | Where-Object { $_ -like '*.ccrm-plain-*' -and (Test-Path -LiteralPath $_) })
+    $ext = @(Read-FileLines $extBk | Where-Object { $_ -like '*.ccrm-plain-*' -and (Test-Path -LiteralPath $_) })
   }
   Get-ChildItem -LiteralPath $plainBackup -Force | Where-Object { $_.Name -ne 'ext-backups.txt' } | ForEach-Object { Write-Host ('  ' + $_.Name) }
   $ext | ForEach-Object { Write-Host ('  ' + $_) }
@@ -831,7 +831,7 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 25
+$ver = 26
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://github.com/cznpsk/ccrm/releases/latest/download/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
