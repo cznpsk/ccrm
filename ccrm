@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=28
+ver=29
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -498,14 +498,6 @@ case "${1:-}" in
     exit $? ;;
 esac
 
-# เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
-ver_cache="$HOME/.cache/ccrm-latest"
-mkdir -p "$HOME/.cache"
-( curl -fsSL --max-time 3 "$raw/VERSION?ts=$(date +%s)" -o "$ver_cache.tmp" 2>/dev/null && mv "$ver_cache.tmp" "$ver_cache" ) &
-latest=$(cat "$ver_cache" 2>/dev/null | tr -d '[:space:]')
-update_note=""
-[[ "$latest" =~ ^[0-9]+$ ]] && (( latest > ver )) && update_note="  |  ⬆ v$latest มาแล้ว"
-
 # ที่เก็บ session ทุกที่: ที่ปกติ + ที่ตั้งผ่าน CLAUDE_CONFIG_DIR / CODEX_HOME (ถ้าเป็นที่อื่น) — โชว์ครบทุกที่
 _env_root() {
   local p="${!1:-}"
@@ -642,6 +634,24 @@ if [[ "${1:-}" == "--list" ]]; then
   exit 0
 fi
 
+# เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
+ver_cache="$HOME/.cache/ccrm-latest"
+mkdir -p "$HOME/.cache"
+latest=$(curl -fsSL --max-time 3 "$raw/VERSION?ts=$(date +%s)" 2>/dev/null | tr -d '[:space:]')
+if [[ "$latest" =~ ^[0-9]+$ ]]; then echo "$latest" > "$ver_cache"; else latest=$(cat "$ver_cache" 2>/dev/null | tr -d '[:space:]'); fi
+update_note=""
+[[ "$latest" =~ ^[0-9]+$ ]] && (( latest > ver )) && update_note="  |  ⬆ v$latest มาแล้ว"
+
+# มีเวอร์ชันใหม่ — ถามก่อนใช้งาน (ก่อนถามรหัสปลดล็อกด้วย) ลูกศรขึ้นลง + Enter, Esc = ข้าม
+if [[ -n "$update_note" ]]; then
+  choice=$(printf 'อัพเดทเป็น v%s เลย\nข้ามไปก่อน (ใช้ v%s ต่อ)\n' "$latest" "$ver" \
+    | fzf --header="⬆ มีเวอร์ชันใหม่ของ ccrm" --no-multi --reverse --no-info --height=~6 --prompt='เลือก> ')
+  if [[ "$choice" == อัพเดท* ]]; then
+    curl -fsSL "$raw/install.sh?ts=$(date +%s)" | bash
+    exec "$HOME/.local/bin/ccrm" "$@"
+  fi
+fi
+
 # ล็อกอยู่ — ปลดก่อนค่อยโชว์ session (Enter ว่าง = ออก)
 lock_note=""; lock_bind=()
 if vault_configured; then
@@ -660,16 +670,6 @@ elif _is_mac && [[ ! -f "$HOME/.cache/ccrm-lock-nag-off" ]]; then
     ตั้งค่า*) _vault_setup; exit $? ;;
     ไม่ต้อง*) touch "$HOME/.cache/ccrm-lock-nag-off" ;;
   esac
-fi
-
-# มีเวอร์ชันใหม่ — เมนูเลือกก่อนเปิด (ลูกศรขึ้นลง + Enter, Esc = ข้าม)
-if [[ -n "$update_note" ]]; then
-  choice=$(printf 'อัพเดทเป็น v%s เลย\nข้ามไปก่อน (ใช้ v%s ต่อ)\n' "$latest" "$ver" \
-    | fzf --header="⬆ มีเวอร์ชันใหม่ของ ccrm" --no-multi --reverse --no-info --height=~6 --prompt='เลือก> ')
-  if [[ "$choice" == อัพเดท* ]]; then
-    curl -fsSL "$raw/install.sh?ts=$(date +%s)" | bash
-    exec "$HOME/.local/bin/ccrm"
-  fi
 fi
 
 reload_cmd="$0 --list ${1:-}"

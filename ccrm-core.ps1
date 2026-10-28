@@ -322,6 +322,7 @@ $extVars = [ordered]@{ 'CLAUDE_CONFIG_DIR' = @('.claude', 'ext-claude', 'Claude'
 # รายการในวอลต์ (path|ชื่อในวอลต์) ไว้ซ่อม junction ตอนได้อักษรไดรฟ์ใหม่
 $extList = 'ext-links.txt'
 $taskName = 'ccrm-sleeplock'
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 
 function Get-VcExe([string]$name) {
   foreach ($d in @("$env:ProgramFiles\VeraCrypt", "${env:ProgramFiles(x86)}\VeraCrypt")) {
@@ -566,16 +567,30 @@ function Install-VaultWrappers {
 }
 
 # ล็อกอัตโนมัติตอน sleep — Task Scheduler ดัก event Kernel-Power 42 (sleep) / 506 (modern standby)
+# task ล็อกตอนเข้าสู่ระบบมีหรือยัง (เครื่องที่ตั้งก่อน v29 มีแค่ตอน sleep)
+function Test-LogonLock {
+  $t = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  if (-not $t) { return $true }   # ปิดล็อกอัตโนมัติไว้เอง — ไม่ต้องเติม
+  if (@($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' }).Count -gt 0) { return $true }
+  return [bool](Get-ItemProperty -Path $runKey -Name $taskName -ErrorAction SilentlyContinue)
+}
+
+# ล็อกตอน sleep + ทุกครั้งที่เข้าสู่ระบบ — Fast Startup ของ Windows ทำให้ Shut down แล้วเปิดใหม่ วอลต์ยัง mount ค้าง
 function Set-SleepTask([bool]$on) {
   Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-  if (-not $on) { Write-Host 'ปิดล็อกอัตโนมัติตอน sleep แล้ว'; return }
+  Remove-ItemProperty -Path $runKey -Name $taskName -ErrorAction SilentlyContinue
+  if (-not $on) { Write-Host 'ปิดล็อกอัตโนมัติแล้ว'; return }
   $core = Join-Path $HOME 'bin\ccrm-core.ps1'
   $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
   $q = "&lt;QueryList&gt;&lt;Query Id='0' Path='System'&gt;&lt;Select Path='System'&gt;*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and (EventID=42 or EventID=506)]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;"
+  $taskArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$core`" lock -Auto"
+  $logon = "<LogonTrigger><Enabled>true</Enabled><UserId>$user</UserId></LogonTrigger>"
+  foreach ($withLogon in $true, $false) {
+  $trig = if ($withLogon) { $logon } else { '' }
   $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <Triggers><EventTrigger><Enabled>true</Enabled><Subscription>$q</Subscription></EventTrigger></Triggers>
+  <Triggers><EventTrigger><Enabled>true</Enabled><Subscription>$q</Subscription></EventTrigger>$trig</Triggers>
   <Principals><Principal id="Author"><UserId>$user</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
@@ -584,22 +599,27 @@ function Set-SleepTask([bool]$on) {
     <ExecutionTimeLimit>PT2M</ExecutionTimeLimit>
     <Enabled>true</Enabled>
   </Settings>
-  <Actions Context="Author"><Exec><Command>powershell.exe</Command><Arguments>-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$core" lock -Auto</Arguments></Exec></Actions>
+  <Actions Context="Author"><Exec><Command>powershell.exe</Command><Arguments>$taskArgs</Arguments></Exec></Actions>
 </Task>
 "@
   try {
     Register-ScheduledTask -TaskName $taskName -Xml $xml -ErrorAction Stop | Out-Null
-    Write-Host '  ✓ ล็อกอัตโนมัติตอนเครื่อง sleep — AI CLI ที่เปิดค้างจะถูกปิดให้ก่อนล็อก'
   } catch {
-    Write-Host "  ! ตั้งล็อกอัตโนมัติไม่ได้: $($_.Exception.Message)"
+    if ($withLogon) { continue }
+    Write-Host "  ! ตั้งล็อกอัตโนมัติไม่ได้: $($_.Exception.Message)"; return
   }
+  # ไม่มีสิทธิ์ตั้ง logon trigger — ใช้ Run key ของผู้ใช้แทน (ไม่ต้อง admin)
+  if (-not $withLogon) { Set-ItemProperty -Path $runKey -Name $taskName -Value "powershell.exe $taskArgs" }
+  break
+  }
+  Write-Host '  ✓ ล็อกอัตโนมัติตอนเครื่อง sleep และทุกครั้งที่เปิดเครื่อง/เข้าสู่ระบบ — AI CLI ที่เปิดค้างจะถูกปิดให้ก่อนล็อก'
 }
 
 function Show-VaultStatus {
   if (-not (Test-VaultConfigured)) { Write-Host 'ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup'; return }
   $l = Get-VaultLetter
   if ($l) { Write-Host "🔓 ปลดล็อกอยู่ (ไดรฟ์ ${l}:)" } else { Write-Host '🔒 ล็อกอยู่' }
-  if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) { Write-Host 'ล็อกอัตโนมัติตอน sleep: เปิด' } else { Write-Host 'ล็อกอัตโนมัติตอน sleep: ปิด (ccrm lock-auto on)' }
+  if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) { Write-Host 'ล็อกอัตโนมัติ (sleep / เปิดเครื่อง): เปิด' } else { Write-Host 'ล็อกอัตโนมัติ: ปิด (ccrm lock-auto on)' }
   if (Test-Path -LiteralPath $plainBackup) { Write-Host '⚠ มีข้อมูลเดิมแบบไม่เข้ารหัสค้างที่ ~\.ccrm-plain-backup — ใช้งานได้ปกติแล้วสั่ง ccrm lock-cleanup' }
 }
 
@@ -823,9 +843,38 @@ if ($PreviewLine) {
   exit 0
 }
 
+$ver = 29
+$verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
+# เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
+$latest = $null
+try {
+  $ProgressPreference = 'SilentlyContinue'
+  $latest = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://github.com/cznpsk/ccrm/releases/latest/download/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim()
+  [System.IO.File]::WriteAllText($verCache, $latest)
+} catch {
+  $latest = Read-FileRaw $verCache
+  if ($latest) { $latest = $latest.Trim() }
+}
+$updateNote = ''
+$ln = 0
+if ([int]::TryParse($latest, [ref]$ln) -and $ln -gt $ver) { $updateNote = "  |  v$latest มาแล้ว" }
+
+# มีเวอร์ชันใหม่ — ถามก่อนใช้งาน (ก่อนถามรหัสปลดล็อกด้วย) ลูกศรขึ้นลง + Enter, Esc = ข้าม
+if ($updateNote -and (Get-Command fzf -ErrorAction SilentlyContinue)) {
+  $choice = @("อัพเดทเป็น v$latest เลย", "ข้ามไปก่อน (ใช้ v$ver ต่อ)") | fzf --header "⬆ มีเวอร์ชันใหม่ของ ccrm" --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> '
+  if ($choice -like 'อัพเดท*') {
+    $u = 'https://github.com/cznpsk/ccrm/releases/latest/download/install.ps1?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds()
+    Invoke-Expression (Invoke-WebRequest -UseBasicParsing -Uri $u).Content
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $HOME 'bin\ccrm-core.ps1')
+    exit 0
+  }
+}
+
 # ล็อกอยู่ — ปลดก่อนค่อยโชว์ session (Enter ว่าง = ออก)
 $lockNote = ''
 if (Test-VaultConfigured) {
+  # เครื่องที่ตั้งก่อน v29 — เติมล็อกตอนเข้าสู่ระบบให้เอง ไม่ต้องสั่ง lock-auto ใหม่
+  if (-not (Test-LogonLock)) { Set-SleepTask $true }
   if (-not (Test-VaultMounted)) {
     Write-Host '🔒 session ถูกล็อกอยู่ (Enter ว่าง = ออก)'
     if (-not (Invoke-VaultUnlock)) { exit 1 }
@@ -849,29 +898,6 @@ $fzf = Get-Command fzf -ErrorAction SilentlyContinue
 if (-not $fzf) {
   Write-Host 'ไม่พบ fzf ติดตั้งก่อน: winget install -e --id junegunn.fzf'
   exit 1
-}
-
-$ver = 28
-$verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
-# เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
-Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://github.com/cznpsk/ccrm/releases/latest/download/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
-$updateNote = ''
-if (Test-Path $verCache) {
-  $latest = Read-FileRaw $verCache
-  if ($latest) { $latest = $latest.Trim() }
-  $ln = 0
-  if ([int]::TryParse($latest, [ref]$ln) -and $ln -gt $ver) { $updateNote = "  |  v$latest มาแล้ว" }
-}
-
-# มีเวอร์ชันใหม่ — เมนูเลือกก่อนเปิด (ลูกศรขึ้นลง + Enter, Esc = ข้าม)
-if ($updateNote) {
-  $choice = @("อัพเดทเป็น v$latest เลย", "ข้ามไปก่อน (ใช้ v$ver ต่อ)") | fzf --header "⬆ มีเวอร์ชันใหม่ของ ccrm" --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> '
-  if ($choice -like 'อัพเดท*') {
-    $u = 'https://github.com/cznpsk/ccrm/releases/latest/download/install.ps1?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds()
-    Invoke-Expression (Invoke-WebRequest -UseBasicParsing -Uri $u).Content
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $HOME 'bin\ccrm-core.ps1')
-    exit 0
-  }
 }
 
 $scriptPath = $PSCommandPath
