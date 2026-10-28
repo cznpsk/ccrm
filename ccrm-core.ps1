@@ -13,19 +13,43 @@ param(
   [string]$Cur,
   [switch]$DeletePath,
   [string]$Target,
-  [switch]$Auto
+  [switch]$Auto,
+  [switch]$ProjectMove
 )
 
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$OutputEncoding = [System.Text.Encoding]::UTF8
+# UTF-8 ไม่มี BOM ทั้งสองทาง — [Text.Encoding]::UTF8 แปะ BOM นำหน้าข้อมูลที่ส่งเข้า fzf
+# แถวแรกเลยมี BOM ติด path ({1} ที่ส่งกลับมาเพี้ยน) และคำตอบเมนูเพี้ยน
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+$OutputEncoding = New-Object System.Text.UTF8Encoding $false
+
+# ผลลัพธ์จาก fzf บางเครื่องกลับมาเป็น UTF-8 ที่ถูกอ่านเป็น cp1252 (à¸•à¸±...) + BOM — ซ่อมกลับ
+# เมนูตัดสินจาก key ASCII นำหน้าเสมอ ห้ามพึ่งการเทียบภาษาไทย
+function Repair-FzfOut([string]$s) {
+  if (-not $s) { return $s }
+  $s = $s.TrimStart([char]0xFEFF)
+  if ($s -match 'à¸|à¹|ï»¿') {
+    try { $s = [System.Text.Encoding]::UTF8.GetString([System.Text.Encoding]::GetEncoding(1252).GetBytes($s)).TrimStart([char]0xFEFF) } catch {}
+  }
+  return $s
+}
 try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 # progress bar ของ Invoke-WebRequest ใน PS 5.1 ทำให้โหลดไฟล์ใหญ่ช้าเป็นสิบเท่า
 $ProgressPreference = 'SilentlyContinue'
 
+# fzf ส่ง {1}/{r} กลับมา — เผื่อมี BOM ติดมาจากแถวแรก
+foreach ($v in 'Line', 'Sel', 'Cur', 'Target') { $x = Get-Variable -Name $v -ValueOnly; if ($x) { Set-Variable -Name $v -Value $x.TrimStart([char]0xFEFF) } }
+
+# release asset มาเป็น application/octet-stream — PS 5.1 คืน .Content เป็น byte[] ต้องถอดเป็นข้อความเอง
+function Get-WebText([string]$u, [int]$timeout = 30) {
+  $c = (Invoke-WebRequest -UseBasicParsing -TimeoutSec $timeout -Uri $u).Content
+  if ($c -is [byte[]]) { $c = [System.Text.Encoding]::UTF8.GetString($c) }
+  return ([string]$c).TrimStart([char]0xFEFF)
+}
+
 # กันกรณี ccrm.cmd เวอร์ชันเก่าส่ง "update" ทะลุมาเป็น positional arg
 if ($Line -eq 'update') {
   $u = 'https://github.com/cznpsk/ccrm/releases/latest/download/install.ps1?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds()
-  Invoke-Expression (Invoke-WebRequest -UseBasicParsing -Uri $u).Content
+  Invoke-Expression (Get-WebText $u)
   exit 0
 }
 
@@ -203,8 +227,50 @@ function Get-TailTitle([string]$p, [long]$from) {
   return $null
 }
 
-# โฟลเดอร์ที่แชทนั้นทำงาน (cwd) — ไว้บอกว่าโปรเจกต์อยู่ในวอลต์ (เข้ารหัส) หรือไม่
+# ทุกโฟลเดอร์ที่แชทเคยทำงาน (Count, Path) มากไปน้อย — ไม่นับ ~ และที่เก็บแชท (~\.claude\projects\...)
+# แชทส่วนใหญ่เริ่มจาก ~ แล้วค่อย cd เข้าโปรเจกต์ ดูแค่ cwd แรกจะได้ ~ เสมอ
+function Get-SessionCwds($item) {
+  $raw = @()
+  switch ($item.Tag) {
+    { $_ -in 'claude', 'codex' } {
+      # cwd อาจอยู่ลึกเป็น MB (มี snapshot ใหญ่ขึ้นก่อน) — อ่านทั้งไฟล์ด้วย Select-String (เร็วกว่าวนบรรทัดเอง)
+      $raw = @(Select-String -LiteralPath $item.RefPath -Pattern '"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"' -AllMatches -Encoding UTF8 -ErrorAction SilentlyContinue |
+          ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value -replace '\\\\', '\' -replace '\\/', '/' })
+    }
+    'kimi' {
+      try { $st = Read-FileRaw $item.RefPath | ConvertFrom-Json; $raw = @($(if ($st.cwd) { [string]$st.cwd } else { [string]$st.workDir })) } catch {}
+    }
+    'gemini' {
+      $r = Read-FileRaw (Join-Path (Split-Path -Parent (Split-Path -Parent $item.RefPath)) '.project_root')
+      if ($r) { $raw = @($r.Trim()) }
+    }
+  }
+  $h = $HOME.TrimEnd('\')
+  $skip = @((Join-Path $h '.claude\projects'), (Join-Path $h '.claude\.ccrm'))
+  $cnt = @{}
+  foreach ($d in $raw) {
+    if (-not $d) { continue }
+    # codex บางรุ่นเก็บเป็น file:// URI
+    if ($d -match '^file:///?([A-Za-z]:.*)$') { $d = $matches[1] } elseif ($d -like 'file://*') { $d = $d.Substring(7) }
+    $d = ($d -replace '%20', ' ' -replace '/', '\').TrimEnd('\')
+    if (-not $d -or $d -ieq $h -or $d -ieq (Join-Path $h '.claude')) { continue }
+    $bad = $false
+    foreach ($s in $skip) { if ($d -ieq $s -or $d.StartsWith($s + '\', [StringComparison]::OrdinalIgnoreCase)) { $bad = $true; break } }
+    if ($bad) { continue }
+    if ($cnt.ContainsKey($d)) { $cnt[$d]++ } else { $cnt[$d] = 1 }
+  }
+  return @($cnt.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Name'; Descending = $false } |
+      ForEach-Object { [pscustomobject]@{ Count = $_.Value; Path = $_.Name } })
+}
+
+# โฟลเดอร์หลักของแชท = ที่ใช้บ่อยที่สุด (ไม่มีโฟลเดอร์อื่นเลย = cwd แรก ซึ่งมักเป็น ~)
 function Get-SessionCwd($item) {
+  $top = @(Get-SessionCwds $item | Select-Object -First 1)
+  if ($top.Count -gt 0) { return $top[0].Path }
+  return (Get-FirstCwd $item)
+}
+
+function Get-FirstCwd($item) {
   $lines = @()
   switch ($item.Tag) {
     'claude' { $lines = Read-FileLines $item.RefPath 40 }
@@ -297,7 +363,6 @@ function Get-SessionRows([bool]$includeAll) {
   $cwdNew = New-Object System.Text.StringBuilder
   if ($vl) {
     $inVault = @($vl + ':\') + @($vaultLinks.Keys | ForEach-Object { (Join-Path $HOME $_) + '\' })
-    $cwdFile = Join-Path $HOME '.claude\.ccrm\cwd.tsv'
     # ที่เก็บแชทที่เป็น junction เข้าไดรฟ์วอลต์ (หรืออยู่บนไดรฟ์วอลต์เอง)
     foreach ($r in @(Get-Roots 'CLAUDE_CONFIG_DIR' '.claude') + @(Get-Roots 'CODEX_HOME' '.codex') + @((Join-Path $HOME '.kimi-code'), (Join-Path $HOME '.gemini'))) {
       $it = Get-Item -LiteralPath $r -Force -ErrorAction SilentlyContinue
@@ -309,10 +374,18 @@ function Get-SessionRows([bool]$includeAll) {
     foreach ($ln in @(Read-FileLines ($vl + ':\' + $extList))) {
       $a = $ln.Split('|'); if ($a.Count -eq 2) { $inVault += ($a[0].TrimEnd('\') + '\') }
     }
-    foreach ($ln in (Read-FileLines $cwdFile)) {
-      $parts = $ln -split "`t", 2
-      if ($parts.Count -eq 2) { $cwdCache[$parts[0]] = $parts[1] }
-    }
+  }
+  # cwd ใช้ทั้งไอคอนและบรรทัด 📂 บนหัว — cache อยู่ในวอลต์ถ้ามี (path โปรเจกต์ไม่ควรหลุดออกมา)
+  # cwd3 = โฟลเดอร์ที่ใช้บ่อยสุด (cwd.tsv รุ่นก่อนเก็บ cwd แรก) · "-" = หาไม่เจอ ไม่ต้องอ่านไฟล์ใหญ่ซ้ำ
+  $cwdFile = if ($vl) { Join-Path $HOME '.claude\.ccrm\cwd3.tsv' } else { Join-Path $env:LOCALAPPDATA 'ccrm-cwd3.tsv' }
+  foreach ($ln in (Read-FileLines $cwdFile)) {
+    $parts = $ln -split "`t", 2
+    if ($parts.Count -eq 2) { $cwdCache[$parts[0]] = $parts[1] }
+  }
+  # junction โปรเจกต์ (ext-links) → ปลายทางในวอลต์ ไว้โชว์ในบรรทัด 📂
+  $projTarget = @{}
+  if ($vl) {
+    foreach ($ln in @(Read-FileLines ($vl + ':\' + $extList))) { $a = $ln.Split('|'); if ($a.Count -eq 2) { $projTarget[$a[0].TrimEnd('\')] = $vl + ':\' + $a[1] } }
   }
 
   $rows = @()
@@ -345,20 +418,32 @@ function Get-SessionRows([bool]$includeAll) {
       $label = $label -replace "[`t`r`n]", ' '
       [void]$newLines.AppendLine($item.RefPath + "`t" + $ck + "`t" + $label)
     }
+    if ($cwdCache.ContainsKey($item.RefPath)) { $cw = $cwdCache[$item.RefPath] }
+    else {
+      $cw = (Get-SessionCwd $item) -replace "[`t`r`n]", ' '
+      [void]$cwdNew.AppendLine($item.RefPath + "`t" + $(if ($cw) { $cw } else { '-' }))
+    }
+    if ($cw -eq '-') { $cw = '' }
+    $cwShow = if ($cw) { Show-P $cw } else { '(แชทนี้ไม่ได้บันทึกโฟลเดอร์ไว้)' }
     $ic = ''
     if ($vl) {
       $ic = '  '
       foreach ($pre in $encRoots) { if ($item.RefPath -like ($pre + '*')) { $ic = '🔒'; break } }
-      if ($cwdCache.ContainsKey($item.RefPath)) { $cw = $cwdCache[$item.RefPath] }
-      else {
-        $cw = (Get-SessionCwd $item) -replace "[`t`r`n]", ' '
-        if ($cw) { [void]$cwdNew.AppendLine($item.RefPath + "`t" + $cw) }
-      }
       $pf = '  '
-      if ($cw) { foreach ($pre in $inVault) { if (($cw.TrimEnd('\') + '\') -like ($pre + '*')) { $pf = '📁'; break } } }
+      if ($cw) {
+        foreach ($pre in $inVault) {
+          if (($cw.TrimEnd('\') + '\') -like ($pre + '*')) {
+            $pf = '📁'
+            $tgt = $projTarget[$pre.TrimEnd('\')]
+            $cwShow += '   (🔒 อยู่ในวอลต์' + $(if ($tgt) { ': ' + $tgt } else { '' }) + ')'
+            break
+          }
+        }
+      }
       $ic = $ic + $pf + ' '
     }
-    $rows += ($item.Path + "`t" + $ic + $item.Tag + "`t" + $dt + "`t" + $sz + "`t" + $label)
+    # ช่องที่ 6 (โฟลเดอร์) ไม่แสดงในแถว — โชว์บนหัวเฉพาะแถวที่เลือกอยู่
+    $rows += ($item.Path + "`t" + $ic + $item.Tag + "`t" + $dt + "`t" + $sz + "`t" + $label + "`t" + $cwShow)
   }
   if ($newLines.Length -gt 0) {
     try {
@@ -367,7 +452,9 @@ function Get-SessionRows([bool]$includeAll) {
       if ($all.Count -gt 5000) { [System.IO.File]::WriteAllLines($cacheFile, $all[-2000..-1]) }
     } catch {}
   }
-  if ($cwdNew.Length -gt 0) { try { [System.IO.File]::AppendAllText($cwdFile, $cwdNew.ToString()) } catch {} }
+  if ($cwdNew.Length -gt 0) {
+    try { New-Item -ItemType Directory -Force -Path (Split-Path $cwdFile -Parent) -ErrorAction SilentlyContinue | Out-Null; [System.IO.File]::AppendAllText($cwdFile, $cwdNew.ToString()) } catch {}
+  }
   return $rows
 }
 
@@ -752,6 +839,14 @@ function Show-VaultStatus {
   $l = Get-VaultLetter
   if ($l) { Write-Host "🔓 ปลดล็อกอยู่ (ไดรฟ์ ${l}:)" } else { Write-Host '🔒 ล็อกอยู่' }
   if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) { Write-Host 'ล็อกอัตโนมัติ (sleep / เปิดเครื่อง): เปิด' } else { Write-Host 'ล็อกอัตโนมัติ: ปิด (ccrm lock-auto on)' }
+  $pl = Get-ProjListFile
+  if ($l -and (Test-Path -LiteralPath $pl)) {
+    $pr = @(Read-FileLines $pl | Where-Object { $_ })
+    if ($pr.Count -gt 0) {
+      Write-Host '📁 โปรเจกต์ที่อยู่ในวอลต์:'
+      foreach ($ln in $pr) { $a = $ln -split "`t", 2; if ($a.Count -eq 2) { Write-Host ("   {0}  →  {1}:\{2}" -f (Show-P $a[0]), $l, $a[1]) } }
+    }
+  }
   if (Test-Path -LiteralPath $plainBackup) { Write-Host '⚠ มีข้อมูลเดิมแบบไม่เข้ารหัสค้างที่ ~\.ccrm-plain-backup — ใช้งานได้ปกติแล้วสั่ง ccrm lock-cleanup' }
 }
 
@@ -988,6 +1083,314 @@ function Invoke-VaultCleanup {
   Write-Host 'ลบแล้ว'
 }
 
+# ---------- ย้ายโฟลเดอร์โปรเจกต์เข้า/ออกวอลต์ (Ctrl-E) ----------
+# เข้า: robocopy เข้า <ไดรฟ์วอลต์>:\projects-code\<ชื่อ> → เทียบ → ของเดิมไปสำรอง → ที่เดิมเป็น junction (path เดิมใช้ต่อได้)
+# จดใน ext-links.txt ให้ Sync-VaultLinks ซ่อม junction ตอนปลดล็อกแล้วได้อักษรไดรฟ์ใหม่ + projects.tsv ไว้โชว์ใน lock-status
+# ออก: ลบ junction → robocopy กลับ → เทียบ → ลบในวอลต์
+$projMarkers = @('.git', 'package.json', 'composer.json', 'pyproject.toml', 'requirements.txt', 'setup.py', 'go.mod', 'Cargo.toml', 'pom.xml', 'build.gradle', 'Gemfile', 'pubspec.yaml', 'deno.json', 'Makefile', 'CMakeLists.txt', 'CLAUDE.md', 'AGENTS.md', '.claude', 'next.config.js', 'vite.config.ts', 'tsconfig.json')
+# ห้ามใช้ ⛔ ⚠ ใน popup: ใต้ fzf + ConPTY เขียนแล้วค้าง (ทดสอบบน VM) — ใช้ × ! แทน
+$ESC = [char]27
+$cB = "$ESC[1m"; $cD = "$ESC[2m"; $cR = "$ESC[31m"; $cG = "$ESC[32m"; $cY = "$ESC[33m"; $cC = "$ESC[36m"; $c0 = "$ESC[0m"
+
+function Get-ProjListFile { return (Join-Path $HOME '.claude\.ccrm\projects.tsv') }
+function Show-P([string]$p) { if ($p -and $p.StartsWith($HOME, [StringComparison]::OrdinalIgnoreCase)) { return '~' + $p.Substring($HOME.Length) }; return $p }
+
+# popup บนจอแยก (alternate screen) — ไม่มีขอบขวา: สระ/วรรณยุกต์ไทยกว้าง 0 คำนวณความกว้างจริงไม่ได้ ขอบขวาจะเบี้ยว
+function Get-UiWidth { $w = 80; try { $w = $Host.UI.RawUI.WindowSize.Width } catch {}; if (-not $w) { $w = 80 }; if ($w -gt 100) { $w = 100 }; return ($w - 4) }
+function Open-Ui([string]$title) {
+  $w = Get-UiWidth
+  [Console]::Write("$ESC[?1049h$ESC[2J$ESC[H`n`n")
+  [Console]::WriteLine("  $cC╭─ $cB" + (Format-UiText $title) + "$c0$cC " + ('─' * [Math]::Max(4, $w - 24)) + $c0)
+  [Console]::WriteLine("  $cC│$c0")
+}
+# อีโมจิ (🔒📁⛔⚠) ใน popup ใต้ fzf ทำให้ ConPTY ค้างกลางทาง (ทดสอบบน VM ผ่าน ssh) — แปลงเป็นข้อความก่อนพิมพ์
+function Format-UiText([string]$t) {
+  return ($t -replace '🔒📁', '[ล็อก+โฟลเดอร์]' -replace '🔒', '[ล็อก]' -replace '📁', '' -replace '📂', '' -replace '⛔', '×' -replace '⚠', '!')
+}
+function Say([string]$t) { [Console]::WriteLine("  $cC│$c0  " + (Format-UiText $t) + $c0) }
+function Close-Ui {
+  $w = Get-UiWidth
+  [Console]::WriteLine("  $cC│$c0")
+  [Console]::WriteLine("  $cC╰" + ('─' * [Math]::Max(4, $w - 2)) + $c0)
+  [Console]::Write("`n  ${cD}กด Enter เพื่อกลับไปที่รายการ$c0 ")
+  [void][Console]::ReadLine()
+  [Console]::Write("$ESC[?1049l")
+}
+function Ask-Line([string]$q) { [Console]::WriteLine("  $cC│$c0"); [Console]::Write("  $cC│$c0  $cY$q$c0"); $a = [Console]::ReadLine(); if ($null -eq $a) { return '' }; return $a }
+function Ask-Yes([string]$q) { return ((Ask-Line $q) -match '^[Yy]') }
+
+# โฟลเดอร์ใหญ่/ของระบบ — ห้ามย้ายทั้งก้อน (ย้ายได้แค่โฟลเดอร์ย่อยที่เป็นโปรเจกต์)
+function Test-ProjDenied([string]$p) {
+  $p = $p.TrimEnd('\')
+  if ($p -match '^[A-Za-z]:$' -or $p -match '^\\\\[^\\]+\\[^\\]+$') { return $true }   # รากไดรฟ์ / share
+  $h = $HOME.TrimEnd('\')
+  $exact = @((Split-Path $h -Parent), $h, $env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, $env:OneDrive, $env:PUBLIC) +
+    @('Desktop', 'Documents', 'Downloads', 'Pictures', 'Music', 'Videos', 'OneDrive', 'Favorites', 'Links', 'Saved Games', 'Contacts', 'Searches', '3D Objects', 'AppData') | ForEach-Object { $_ }
+  foreach ($d in $exact) {
+    if (-not $d) { continue }
+    $full = if ($d -match '^[A-Za-z]:|^\\\\') { $d } else { Join-Path $h $d }
+    if ($p -ieq $full.TrimEnd('\')) { return $true }
+  }
+  foreach ($d in @((Join-Path $h 'AppData'), $env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)) {
+    if ($d -and $p.StartsWith($d.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+  }
+  # โฟลเดอร์ซ่อนใน home (.ssh .config ...)
+  if ($p.StartsWith($h + '\.', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+  # ครอบของสำคัญไว้ข้างใน (home, ที่เก็บวอลต์)
+  foreach ($d in @($h, $vaultDir)) { if (($d.TrimEnd('\') + '\').StartsWith($p + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true } }
+  return $false
+}
+
+# มีโปรแกรมเปิดไฟล์/cwd อยู่ข้างใน = Windows ไม่ยอมให้เปลี่ยนชื่อโฟลเดอร์ — ลองเปลี่ยนแล้วเปลี่ยนกลับ
+function Test-ProjBusy([string]$p) {
+  $tmp = (Split-Path $p -Leaf) + '.ccrm-busy-check'
+  try { Rename-Item -LiteralPath $p -NewName $tmp -ErrorAction Stop } catch { return $true }
+  try { Rename-Item -LiteralPath (Join-Path (Split-Path $p -Parent) $tmp) -NewName (Split-Path $p -Leaf) -ErrorAction Stop } catch { Write-Host "  ! เปลี่ยนชื่อกลับไม่ได้: $tmp"; return $true }
+  return $false
+}
+
+# สถานะของโฟลเดอร์หนึ่งอัน: out=ย้ายคืนได้ in=อยู่ในวอลต์แล้ว deny gone ok
+function Get-ProjState([string]$d, [string]$vl) {
+  $it = Get-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue
+  if (-not $it) { return 'gone' }
+  if ($it.LinkType -eq 'Junction') {
+    $t = [string]@($it.Target)[0]
+    if ($t -like ($vl + ':\projects-code\*')) { return 'out' }
+    if ($t -like ($vl + ':\*')) { return 'in' }
+  }
+  if ($d -like ($vl + ':\*')) { return 'in' }
+  foreach ($k in $vaultLinks.Keys) { $pre = (Join-Path $HOME $k) + '\'; if (($d.TrimEnd('\') + '\').StartsWith($pre, [StringComparison]::OrdinalIgnoreCase)) { return 'in' } }
+  foreach ($ln in @(Read-FileLines ($vl + ':\' + $extList))) {
+    $a = $ln.Split('|'); if ($a.Count -eq 2 -and ($d.TrimEnd('\') + '\').StartsWith($a[0].TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { return 'in' }
+  }
+  if (Test-ProjDenied $it.FullName) { return 'deny' }
+  return 'ok'
+}
+
+# แปลงคำตอบ "4" "4,5" "4 5" "4-5" "a" เป็นรายการเลข — คืน @{ Nums; Err }
+function Get-PickNumbers([string]$s, [int]$n, [string[]]$states) {
+  $s = ($s -replace ',', ' ').Trim()
+  if (-not $s) { return @{ Nums = @(); Err = 'ยกเลิก — ไม่ได้แตะอะไร' } }
+  $nums = @()
+  if ($s -match '^(a|all|ทั้งหมด)$') {
+    for ($k = 1; $k -le $n; $k++) { if ($states[$k] -eq 'ok') { $nums += $k } }
+    if ($nums.Count -eq 0) { return @{ Nums = @(); Err = 'ไม่มีโฟลเดอร์ที่ย้ายเข้าได้ในรายการนี้' } }
+    return @{ Nums = $nums; Err = $null }
+  }
+  foreach ($tok in ($s -split '\s+')) {
+    if ($tok -match '^(\d+)-(\d+)$') { for ($k = [int]$matches[1]; $k -le [int]$matches[2]; $k++) { $nums += $k } }
+    elseif ($tok -match '^\d+$') { $nums += [int]$tok }
+    else { return @{ Nums = @(); Err = "ไม่เข้าใจ `"$tok`" — ยกเลิก ไม่ได้แตะอะไร" } }
+  }
+  foreach ($k in $nums) { if ($k -lt 1 -or $k -gt $n) { return @{ Nums = @(); Err = "ไม่มีเลข $k — ยกเลิก ไม่ได้แตะอะไร" } } }
+  return @{ Nums = @($nums | Select-Object -Unique); Err = $null }
+}
+
+function Remove-ProjRecords([string]$p, [string]$vl) {
+  foreach ($f in @(($vl + ':\' + $extList), (Get-ProjListFile))) {
+    if (-not (Test-Path -LiteralPath $f)) { continue }
+    $keep = @(Read-FileLines $f | Where-Object { -not ($_.StartsWith($p + '|', [StringComparison]::OrdinalIgnoreCase) -or $_.StartsWith($p + "`t", [StringComparison]::OrdinalIgnoreCase)) })
+    [System.IO.File]::WriteAllLines($f, [string[]]$keep)
+  }
+}
+
+# ย้ายโฟลเดอร์ $cw เข้าวอลต์ — mode: '' = ถามเอง · check = ตรวจ+สรุปบรรทัดเดียว · go = ย้ายเลย (ยืนยันรวมแล้ว)
+function Invoke-ProjectIn([string]$cw, [string]$vl, [string]$mode) {
+  $it = Get-Item -LiteralPath $cw -Force -ErrorAction SilentlyContinue
+  if (-not $it) { Say "ไม่พบโฟลเดอร์ $(Show-P $cw)"; return $false }
+  if ($it.LinkType) { Say "$(Show-P $cw) เป็นลิงก์ไปที่อื่น — ย้ายโฟลเดอร์ปลายทางเองแทน"; return $false }
+  $p = $it.FullName.TrimEnd('\')
+  $found = $null
+  foreach ($m in $projMarkers) { if (Test-Path -LiteralPath (Join-Path $p $m)) { $found = $m; break } }
+  if (-not $mode) { Say 'กำลังตรวจขนาด ...' }
+  $sig = Get-TreeSig $p
+  $n = $sig.Split(' ')[0]; $bytes = [long]$sig.Split(' ')[1]
+  $free = (New-Object System.IO.DriveInfo $vl).AvailableFreeSpace
+  if ($bytes + 512MB -gt $free) { Say "$cR× ที่ว่างในวอลต์ไม่พอ: ต้องใช้ $(Format-Size $bytes)B แต่ว่าง $(Format-Size $free)B (ต้องเหลือเผื่อ 512 MB)"; return $false }
+  if (Test-ProjBusy $p) { Say "$cR× มีโปรแกรมเปิดไฟล์/อยู่ในโฟลเดอร์นี้ — ปิด VS Code / terminal ที่ cd อยู่ข้างใน แล้วลองใหม่"; return $false }
+  $name = Split-Path $p -Leaf
+  $rel = 'projects-code\' + $name; $k = 2
+  while (Test-Path -LiteralPath ($vl + ':\' + $rel)) { $rel = 'projects-code\' + $name + '-' + $k; $k++ }
+  $dst = $vl + ':\' + $rel
+  $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+  if ($mode -eq 'check') {
+    Say (" • $(Show-P $p)  →  $dst   $cD(" + (Format-Size $bytes) + "B, $n ไฟล์)$c0")
+    if (-not $found) { Say "   $cY! ไม่เจอไฟล์ที่บอกว่าเป็นโปรเจกต์ (.git, package.json ฯลฯ)$c0" }
+    if ($bytes -gt 5GB) { Say "   $cY! ใหญ่เกิน 5 GB — ใช้เวลาคัดลอกนาน$c0" }
+    return $true
+  }
+  if ($mode -ne 'go') {
+    Say "${cB}ย้ายโฟลเดอร์โปรเจกต์เข้าวอลต์ (เข้ารหัส)$c0"
+    Say ''
+    Say "  จาก:  $(Show-P $p)   ($(Format-Size $bytes)B, $n ไฟล์)"
+    Say "  ไป:   $dst   (ในวอลต์)"
+    if (-not $found) { Say "  $cY! ไม่เจอไฟล์ที่บอกว่าเป็นโปรเจกต์ (.git, package.json ฯลฯ) — แน่ใจนะว่าเป็นโฟลเดอร์โปรเจกต์$c0" }
+    if ($bytes -gt 5GB) { Say "  $cY! ใหญ่เกิน 5 GB — ใช้เวลาคัดลอกนาน$c0" }
+    Say '  ผลลัพธ์:'
+    Say "   • ที่เดิม ($(Show-P $p)) กลายเป็น junction ชี้เข้าวอลต์ — path เดิมใช้ได้เหมือนเดิม (VS Code, terminal, resume แชท)"
+    Say '   • ตอนล็อก เปิดโฟลเดอร์นี้ไม่ได้ (Explorer / VS Code / AI ทุกตัว)'
+    Say '   • แถวแชทที่ใช้โฟลเดอร์นี้จะขึ้น 🔒📁'
+    Say "   • ของเดิมเก็บสำรองไว้ใน ~\.ccrm-plain-backup (ไม่เข้ารหัส) จนกว่าจะสั่ง ccrm lock-cleanup"
+    Say '   • ลืมรหัส + lock-reset = โค้ดชุดนี้เปิดไม่ได้ด้วย (ถ้ายังไม่ cleanup ยังกู้จากสำรองได้)'
+    Say '  ย้ายคืนได้: กด Ctrl-E ที่แถวนี้อีกครั้ง แล้วเลือกโฟลเดอร์ที่ขึ้นว่า "ย้ายคืนได้"'
+    if (-not (Ask-Yes 'ย้ายเลยไหม? พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): ')) { Say 'ยกเลิก — ไม่ได้แตะอะไร'; return $false }
+    if (-not $found -and -not (Ask-Yes 'ยืนยันอีกครั้ง (ไม่เจอไฟล์โปรเจกต์) พิมพ์ y: ')) { Say 'ยกเลิก — ไม่ได้แตะอะไร'; return $false }
+  }
+  Say 'คัดลอก ...'
+  & robocopy $p $dst /E /COPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+  if ($LASTEXITCODE -ge 8) { Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue; Say "$cR✗ คัดลอกไม่สำเร็จ — ของเดิมไม่ถูกแตะ"; return $false }
+  if ((Get-TreeSig $dst) -ne $sig) { Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue; Say "$cR✗ คัดลอกไม่ครบ — ของเดิมไม่ถูกแตะ"; return $false }
+  # ของเดิม: ไดรฟ์เดียวกับ home = ย้ายเข้า ~\.ccrm-plain-backup (เร็ว) · คนละไดรฟ์ = เปลี่ยนชื่อไว้ข้างๆ ไม่ต้อง copy ข้ามไดรฟ์ซ้ำ
+  New-Item -ItemType Directory -Force -Path $plainBackup | Out-Null
+  if ($p.Substring(0, 2) -ieq $plainBackup.Substring(0, 2)) {
+    $bk = Join-Path $plainBackup ("project-$name.$ts"); $extBk = $false
+  } else {
+    $bk = "$p.ccrm-plain-$ts"; $extBk = $true
+  }
+  try { Move-Item -LiteralPath $p -Destination $bk -ErrorAction Stop }
+  catch { Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue; Say "$cR✗ ย้ายของเดิมไปสำรองไม่ได้ — ของเดิมไม่ถูกแตะ"; return $false }
+  try { New-Item -ItemType Junction -Path $p -Target $dst -ErrorAction Stop | Out-Null }
+  catch {
+    Move-Item -LiteralPath $bk -Destination $p -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue
+    Say "$cR✗ สร้าง junction ไม่ได้ — คืนของเดิมแล้ว"; return $false
+  }
+  if ($extBk) { [System.IO.File]::AppendAllText((Join-Path $plainBackup 'ext-backups.txt'), $bk + "`r`n") }
+  Remove-ProjRecords $p $vl
+  [System.IO.File]::AppendAllText(($vl + ':\' + $extList), $p + '|' + $rel + "`r`n")
+  $pl = Get-ProjListFile
+  New-Item -ItemType Directory -Force -Path (Split-Path $pl -Parent) | Out-Null
+  [System.IO.File]::AppendAllText($pl, $p + "`t" + $rel + "`r`n")
+  Say "$cG✓ ย้ายแล้ว — $(Show-P $p) → $dst ($n ไฟล์)"
+  return $true
+}
+
+# ย้ายคืนออกจากวอลต์ ($p = path เดิมที่ตอนนี้เป็น junction เข้า projects-code)
+function Invoke-ProjectOut([string]$p, [string]$vl) {
+  $it = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+  if (-not $it -or $it.LinkType -ne 'Junction') { Say "$(Show-P $p) ไม่ได้เป็น junction เข้าวอลต์ — ไม่มีอะไรต้องย้ายคืน"; return $false }
+  $p = $it.FullName.TrimEnd('\')
+  $dst = [string]@($it.Target)[0]
+  if (-not ($dst -like ($vl + ':\projects-code\*')) -or -not (Test-Path -LiteralPath $dst)) { Say "$(Show-P $p) ไม่ได้ชี้เข้า ${vl}:\projects-code — ไม่แตะ"; return $false }
+  if (Test-ProjBusy $dst) { Say "$cR× มีโปรแกรมเปิดไฟล์/อยู่ในโฟลเดอร์นี้ — ปิด VS Code / terminal ที่ cd อยู่ข้างใน แล้วลองใหม่"; return $false }
+  $sig = Get-TreeSig $dst
+  $n = $sig.Split(' ')[0]
+  Say "${cB}ย้ายโฟลเดอร์โปรเจกต์ออกจากวอลต์ (กลับไปไม่เข้ารหัส)$c0"
+  Say ''
+  Say "  จาก:  $dst   ($(Format-Size ([long]$sig.Split(' ')[1]))B, $n ไฟล์ ในวอลต์)"
+  Say "  ไป:   $(Show-P $p)   (โฟลเดอร์จริงที่เดิม)"
+  Say '  ผลลัพธ์:'
+  Say '   • ไฟล์กลับไปอยู่ที่เดิมแบบไม่เข้ารหัส เปิดได้แม้ตอนล็อก'
+  Say '   • สำเนาในวอลต์ถูกลบหลังคัดลอกครบ'
+  Say '   • แถวแชทจะเหลือแค่ 🔒 (ไม่มี 📁)'
+  Say '  ย้ายเข้าใหม่ได้: กด Ctrl-E อีกครั้ง'
+  if (-not (Ask-Yes 'ย้ายคืนเลยไหม? พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): ')) { Say 'ยกเลิก — ไม่ได้แตะอะไร'; return $false }
+  Remove-Junction $p
+  Say 'คัดลอก ...'
+  & robocopy $dst $p /E /COPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+  if ($LASTEXITCODE -ge 8 -or (Get-TreeSig $p) -ne $sig) {
+    Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Junction -Path $p -Target $dst | Out-Null
+    Say "$cR✗ คัดลอกกลับไม่ครบ — คืนเป็น junction เหมือนเดิม ข้อมูลในวอลต์ไม่ถูกแตะ"; return $false
+  }
+  Remove-Item -LiteralPath $dst -Recurse -Force
+  Remove-ProjRecords $p $vl
+  Say "$cG✓ ย้ายคืนแล้ว — $(Show-P $p) ($n ไฟล์)"
+  return $true
+}
+
+# เลือกหลายอัน — ย้ายเข้าเฉพาะที่ย้ายได้ สรุปรวมแล้วยืนยันครั้งเดียว (ย้ายคืนต้องเลือกทีละอัน)
+function Invoke-ProjectBatch($nums, $sel, $states, [string]$vl) {
+  Say ''
+  Say "${cB}ย้ายโฟลเดอร์โปรเจกต์เข้าวอลต์ (เข้ารหัส) — หลายโฟลเดอร์$c0"
+  Say ''
+  $go = @()
+  foreach ($k in $nums) {
+    $d = $sel[$k]
+    switch ($states[$k]) {
+      'ok'   { if (Invoke-ProjectIn $d $vl 'check') { $go += $k } }
+      'out'  { Say " • $cD$(Show-P $d) — ย้ายเข้าแล้ว ข้าม (ย้ายคืนให้เลือกทีละอัน)$c0" }
+      'in'   { Say " • $cD$(Show-P $d) — อยู่ในวอลต์อยู่แล้ว ข้าม$c0" }
+      'deny' { Say " • $cR$(Show-P $d) — × โฟลเดอร์ใหญ่/ระบบ ข้าม$c0" }
+      'gone' { Say " • $cD$(Show-P $d) — ไม่มีแล้ว ข้าม$c0" }
+    }
+  }
+  if ($go.Count -eq 0) { Say ''; Say 'ไม่มีโฟลเดอร์ที่ย้ายได้ — ไม่ได้แตะอะไร'; return }
+  Say ''
+  Say '  ผลลัพธ์ (ทุกโฟลเดอร์ข้างบน):'
+  Say '   • ที่เดิมกลายเป็น junction ชี้เข้าวอลต์ — path เดิมใช้ได้เหมือนเดิม (VS Code, terminal, resume แชท)'
+  Say '   • ตอนล็อก เปิดโฟลเดอร์พวกนี้ไม่ได้ (Explorer / VS Code / AI ทุกตัว)'
+  Say '   • ของเดิมเก็บสำรองไว้ใน ~\.ccrm-plain-backup (ไม่เข้ารหัส) จนกว่าจะสั่ง ccrm lock-cleanup'
+  Say '   • ลืมรหัส + lock-reset = โค้ดพวกนี้เปิดไม่ได้ด้วย (ถ้ายังไม่ cleanup ยังกู้จากสำรองได้)'
+  Say '  ย้ายคืนได้ทีละโฟลเดอร์: กด Ctrl-E แล้วเลือกโฟลเดอร์ที่ขึ้นว่า "ย้ายคืนได้"'
+  if (-not (Ask-Yes "ย้ายทั้ง $($go.Count) โฟลเดอร์เลยไหม? พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ยกเลิก): ")) { Say 'ยกเลิก — ไม่ได้แตะอะไร'; return }
+  $done = 0
+  foreach ($k in $go) {
+    $d = $sel[$k]
+    # ย้ายตัวแม่ไปแล้ว ตัวลูกจะกลายเป็นอยู่ในวอลต์ — เช็คสถานะใหม่ก่อนทุกอัน
+    if ((Get-ProjState $d $vl) -ne 'ok') { Say " • $cD$(Show-P $d) — ย้ายไปพร้อมโฟลเดอร์แม่แล้ว$c0"; $done++; continue }
+    Say ''
+    Say "$cB$(Show-P $d)$c0"
+    if (Invoke-ProjectIn $d $vl 'go') { $done++ }
+  }
+  Say ''
+  if ($done -eq $go.Count) { Say "$cG✓ เสร็จครบ $done โฟลเดอร์$c0" } else { Say "$cY! สำเร็จ $done จาก $($go.Count) โฟลเดอร์ (ดูข้อความข้างบน)$c0" }
+}
+
+# Ctrl-E: $target = path จากแถว (ไฟล์แชท / โฟลเดอร์ kimi) $tagField = ช่อง tag (มีไอคอนปน)
+function Invoke-ProjectMove([string]$target, [string]$tagField) {
+  $tag = ($tagField -replace '[^a-z]', '')
+  $ref = if ($tag -eq 'kimi') { Join-Path $target 'state.json' } else { $target }
+  $vl = Get-VaultLetter
+  if (-not (Test-VaultConfigured) -or -not $vl) { Say 'ต้องตั้งค่าล็อกและปลดล็อกอยู่ก่อน (ccrm lock-setup / ccrm unlock)'; return }
+  Say "${cD}กำลังดูว่าแชทนี้ทำงานในโฟลเดอร์ไหนบ้าง ...$c0"
+  $list = @(Get-SessionCwds ([pscustomobject]@{ Tag = $tag; RefPath = $ref }) | Select-Object -First 6)
+  if ($list.Count -eq 0) {
+    Say ''
+    Say "📂 แชทนี้ทำงานแค่ใน ~ ($HOME)"
+    Say "$cR× ย้ายไม่ได้ — ~ คือโฟลเดอร์ผู้ใช้ทั้งก้อน$c0"
+    Say "   ${cD}ทางแก้: cd เข้าโฟลเดอร์โปรเจกต์ก่อน แล้วค่อยเริ่มแชทใหม่ — แชทนั้นจะย้ายได้$c0"
+    return
+  }
+  Say ''
+  Say "${cB}โฟลเดอร์ที่แชทนี้ใช้ทำงาน$c0"
+  Say ''
+  $sel = @{}; $states = @{}; $n = 0
+  foreach ($e in $list) {
+    $n++; $sel[$n] = $e.Path; $st = Get-ProjState $e.Path $vl; $states[$n] = $st
+    $txt = switch ($st) {
+      'ok'   { "${cG}ย้ายเข้าวอลต์ได้$c0" }
+      'out'  { "🔒 ย้ายเข้าวอลต์แล้ว ${cG}(ย้ายคืนได้)$c0" }
+      'in'   { '🔒 อยู่ในวอลต์อยู่แล้ว' }
+      'deny' { "${cR}× โฟลเดอร์ใหญ่/ระบบ ห้ามย้าย$c0" }
+      'gone' { "${cD}ไม่มีโฟลเดอร์นี้แล้ว$c0" }
+    }
+    Say " $cB$n.$c0 $(Show-P $e.Path)"
+    Say "      ${cD}ใช้ $($e.Count) ครั้ง ·$c0 $txt"
+  }
+  $stArr = @('') + @(1..$n | ForEach-Object { $states[$_] })
+  $r = Get-PickNumbers (Ask-Line 'เลือกเลข เช่น 4 · 4,5 · 4-5 · a = ทุกอันที่ย้ายได้ (Enter เฉยๆ = ยกเลิก): ') $n $stArr
+  if ($r.Err) { Say $r.Err; return }
+  if (@($r.Nums).Count -gt 1) { Invoke-ProjectBatch $r.Nums $sel $states $vl; return }
+  $k = @($r.Nums)[0]; $d = $sel[$k]
+  Say ''
+  switch ($states[$k]) {
+    'out'  { [void](Invoke-ProjectOut $d $vl) }
+    'in'   { Say "🔒 $(Show-P $d) อยู่ในวอลต์อยู่แล้ว (ไม่ได้ย้ายผ่าน Ctrl-E เลยไม่มี junction ให้ย้ายคืน)" }
+    'deny' { Say "$cR× $(Show-P $d) เป็นโฟลเดอร์ใหญ่/โฟลเดอร์ระบบ — ย้ายได้แค่โฟลเดอร์โปรเจกต์$c0" }
+    'gone' { Say "ไม่พบโฟลเดอร์ $(Show-P $d) แล้ว (ถูกลบหรือย้ายไป)" }
+    'ok'   { [void](Invoke-ProjectIn $d $vl '') }
+  }
+}
+
+# Ctrl-E (เรียกจาก fzf execute) — popup บนจอแยก แล้วกลับรายการ
+if ($ProjectMove) {
+  Open-Ui '📁 Ctrl-E · ย้ายโปรเจกต์'
+  try { Invoke-ProjectMove $Target $Sel } catch { Say "$cR✗ ผิดพลาด: $($_.Exception.Message)$c0" }
+  Close-Ui
+  exit 0
+}
+
 # คำสั่งย่อย — ccrm.cmd ส่ง %* มา: คำแรกตกที่ $Line คำที่สองตกที่ $Sel (positional)
 switch ($Line) {
   'lock'         { if (Invoke-VaultLock $Auto.IsPresent) { exit 0 } else { exit 1 } }
@@ -1056,7 +1459,8 @@ $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 $latest = $null
 try {
   $ProgressPreference = 'SilentlyContinue'
-  $latest = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://github.com/cznpsk/ccrm/releases/latest/download/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim()
+  # เดิม .Content.Trim() พังเงียบๆ (byte[]) เมนูอัปเดตบน Windows เลยไม่เคยขึ้น
+  $latest = (Get-WebText ('https://github.com/cznpsk/ccrm/releases/latest/download/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds()) 3).Trim()
   [System.IO.File]::WriteAllText($verCache, $latest)
 } catch {
   $latest = Read-FileRaw $verCache
@@ -1068,10 +1472,10 @@ if ([int]::TryParse($latest, [ref]$ln) -and $ln -gt $ver) { $updateNote = "  |  
 
 # มีเวอร์ชันใหม่ — ถามก่อนใช้งาน (ก่อนถามรหัสปลดล็อกด้วย) ลูกศรขึ้นลง + Enter, Esc = ข้าม
 if ($updateNote -and (Get-Command fzf -ErrorAction SilentlyContinue)) {
-  $choice = @("อัพเดทเป็น v$latest เลย", "ข้ามไปก่อน (ใช้ v$ver ต่อ)") | fzf --header "⬆ มีเวอร์ชันใหม่ของ ccrm" --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> '
-  if ($choice -like 'อัพเดท*') {
+  $choice = Repair-FzfOut (@("update`tอัพเดทเป็น v$latest เลย", "skip`tข้ามไปก่อน (ใช้ v$ver ต่อ)") | fzf --delimiter "`t" --with-nth 2.. --header "⬆ มีเวอร์ชันใหม่ของ ccrm" --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> ')
+  if ($choice -like 'update*') {
     $u = 'https://github.com/cznpsk/ccrm/releases/latest/download/install.ps1?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds()
-    Invoke-Expression (Invoke-WebRequest -UseBasicParsing -Uri $u).Content
+    Invoke-Expression (Get-WebText $u)
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $HOME 'bin\ccrm-core.ps1')
     exit 0
   }
@@ -1093,9 +1497,9 @@ if (Test-VaultConfigured) {
   if ($vl) { Protect-VaultDirs $vl }
   $lockNote = '  |  🔓 Ctrl-L=ล็อก'
 } elseif (-not (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'ccrm-lock-nag-off')) -and (Get-Command fzf -ErrorAction SilentlyContinue)) {
-  $choice = @('ตั้งค่าเลย (ccrm lock-setup)', 'ไว้ทีหลัง', 'ไม่ต้องถามอีก') | fzf --header '🔐 ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep' --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> '
-  if ($choice -like 'ตั้งค่า*') { Invoke-VaultSetup; exit 0 }
-  if ($choice -like 'ไม่ต้อง*') { [System.IO.File]::WriteAllText((Join-Path $env:LOCALAPPDATA 'ccrm-lock-nag-off'), '1') }
+  $choice = Repair-FzfOut (@("setup`tตั้งค่าเลย (ccrm lock-setup)", "later`tไว้ทีหลัง", "never`tไม่ต้องถามอีก") | fzf --delimiter "`t" --with-nth 2.. --header '🔐 ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep' --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> ')
+  if ($choice -like 'setup*') { Invoke-VaultSetup; exit 0 }
+  if ($choice -like 'never*') { [System.IO.File]::WriteAllText((Join-Path $env:LOCALAPPDATA 'ccrm-lock-nag-off'), '1') }
 }
 
 $rows = @(Get-SessionRows -includeAll:$All)
@@ -1112,17 +1516,27 @@ if (-not $fzf) {
 
 $scriptPath = $PSCommandPath
 $psBase = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' + $scriptPath + '"'
-# หัว 2 บรรทัด — บรรทัดเดียวยาวเกินช่องรายการ (พรีวิวกินครึ่งจอ) Ctrl-L ตกขอบมองไม่เห็น
-$header = "รวม $($rows.Count) sessions  |  ccrm v$ver$lockNote$updateNote`nEnter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก"
+# หัว 2 บรรทัด — บรรทัดเดียวยาวเกินช่องรายการ Ctrl-L ตกขอบมองไม่เห็น
+$h2 = if ($lockNote) { 'Enter=resume  Ctrl-E=ย้ายโปรเจกต์เข้า/ออกวอลต์ 📁  Tab=ลบ (กด 2 ครั้ง)  Ctrl-A=รีเฟรช  Esc=ยกเลิก' } else { 'Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก' }
+$header = "รวม $($rows.Count) sessions  |  ccrm v$ver$lockNote$updateNote`n$h2"
+# 📂 โฟลเดอร์ของแถวที่เลือก — โชว์ที่ prompt (Mac โชว์เป็นบรรทัดที่ 3 ของหัว)
+# fzf บน Windows รัน transform ผ่าน cmd ธรรมดา: echo ทิ้ง CR (␍) ท้ายบรรทัด และไม่มี !VAR! ให้ใช้ — set /p พิมพ์โดยไม่ขึ้นบรรทัด
+# PS 5.1 ไม่ escape " ใน argument ที่ส่งให้ native — ต้องเขียน \" เอง
+$hdrCmd = 'transform-prompt:<nul set /p \"=📂 {r6}  > \"'
+$hdrBinds = @('--bind', ('load:' + $hdrCmd), '--bind', ('focus:' + $hdrCmd))
 $previewCmd = $psBase + ' -PreviewLine -Line "{r}"'
 $allFlag = if ($All) { ' -All' } else { '' }
 $tabBind = 'tab:transform:' + $psBase + ' -TabTransform -Sel {+1} -Cur {1}' + $allFlag
 
 $refreshBind = 'ctrl-a:reload(' + $psBase + ' -ListOnly)'
 # fzf บน Windows ไม่มี become — execute แล้ว abort แทน
+# Ctrl-E ต้อง <CON ด้วย — ไม่งั้น stdin ของ popup ถูก redirect อ่านคำตอบได้ค่าว่าง (ทดสอบบน VM แล้ว)
 # >CON — output ของ lock ห้ามไหลไปเป็นผลลัพธ์ของ fzf (จะกลายเป็นชื่อ session ที่ไป resume)
-$lockBind = if ($lockNote) { @('--bind', ('ctrl-l:execute(' + $psBase + ' lock >CON)+abort')) } else { @() }
-$picked = $rows | fzf --multi --delimiter "`t" --with-nth 2.. --header $header --preview $previewCmd --preview-window hidden --tabstop 1 --bind $tabBind --bind $refreshBind @lockBind
+$lockBind = if ($lockNote) {
+  @('--bind', ('ctrl-l:execute(' + $psBase + ' lock >CON)+abort'),
+    '--bind', ('ctrl-e:execute(' + $psBase + ' -ProjectMove -Target {1} -Sel {2} <CON >CON)+reload(' + $psBase + ' -ListOnly' + $allFlag + ')'))
+} else { @() }
+$picked = $rows | fzf --multi --delimiter "`t" --with-nth 2..5 @hdrBinds --header $header --preview $previewCmd --preview-window hidden --tabstop 1 --bind $tabBind --bind $refreshBind @lockBind
 
 if (-not $picked) {
   # Ctrl-L ล็อกแล้ว fzf ล้างจอทิ้ง — บอกผลอีกที
@@ -1130,6 +1544,7 @@ if (-not $picked) {
   exit 0
 }
 
+$picked = Repair-FzfOut ([string]@($picked)[0])
 $fields = $picked -split "`t"
 $spath = $fields[0]
 $tag = ($fields[1] -replace '[^a-z]', '')
