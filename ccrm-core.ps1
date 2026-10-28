@@ -404,6 +404,29 @@ function Invoke-VcDismount([string]$letter) {
 }
 
 # ให้ทุก junction ชี้ไดรฟ์ปัจจุบัน — adopt = ย้ายโฟลเดอร์จริงที่ยังอยู่ข้างนอกเข้าวอลต์ (ตอน setup)
+# ไดรฟ์ VeraCrypt (NTFS ใหม่) ให้ Users/Authenticated Users เข้าถึงได้ — codex ปฏิเสธ
+# ("socket directory is not private to the current user") ตั้ง ACL ให้เหมือนโฟลเดอร์ใน profile:
+# ตัวเรา + SYSTEM + Administrators เท่านั้น (เช็ค ACL ก่อน ถูกอยู่แล้วไม่ไล่ icacls ทั้งต้น)
+function Set-PrivateAcl([string]$dir) {
+  $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $ok = @($me, 'S-1-5-18', 'S-1-5-32-544')
+  try {
+    $bad = @((Get-Acl -LiteralPath $dir).Access | Where-Object {
+        try { $ok -notcontains $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { $true }
+      })
+    if ($bad.Count -eq 0) { return }
+  } catch {}
+  & icacls $dir /inheritance:r /grant:r "*${me}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C /Q | Out-Null
+}
+
+# ทุกโฟลเดอร์ของค่ายในวอลต์ (รวมที่เก็บนอกที่ปกติ ext-*)
+function Protect-VaultDirs([string]$letter) {
+  $root = $letter + ':\'
+  foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue)) {
+    if ($d.Name -in @($vaultLinks.Values) -or $d.Name -like 'ext-*') { Set-PrivateAcl $d.FullName }
+  }
+}
+
 function Sync-VaultLinks([string]$letter, [bool]$adopt) {
   foreach ($k in $vaultLinks.Keys) {
     $src = Join-Path $HOME $k
@@ -449,6 +472,7 @@ function Sync-VaultLinks([string]$letter, [bool]$adopt) {
       if ((Test-Path -LiteralPath $dst) -and -not (Set-Junction $a[0] $dst)) { Write-Host "  ! $($a[0]) ไม่ใช่ junction ข้ามไป" }
     }
   }
+  Protect-VaultDirs $letter
 }
 
 # Process ก่อน — CLI ได้ค่าจาก terminal ที่เปิดมัน ($PROFILE ทับ User ได้)
@@ -918,7 +942,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 34
+$ver = 35
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
@@ -956,6 +980,9 @@ if (Test-VaultConfigured) {
     # Enter ที่ค้างจากช่องรหัสจะหลุดเข้า fzf กลายเป็นกด resume — ล้างทิ้งก่อน
     try { $Host.UI.RawUI.FlushInputBuffer() } catch {}
   }
+  # วอลต์ที่ตั้งก่อน v35 — ACL ยังเปิดให้ Users (codex ไม่ยอมทำงาน) แก้ให้ตอนเปิด ccrm
+  $vl = Get-VaultLetter
+  if ($vl) { Protect-VaultDirs $vl }
   $lockNote = '  |  🔓 Ctrl-L=ล็อก'
 } elseif (-not (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'ccrm-lock-nag-off')) -and (Get-Command fzf -ErrorAction SilentlyContinue)) {
   $choice = @('ตั้งค่าเลย (ccrm lock-setup)', 'ไว้ทีหลัง', 'ไม่ต้องถามอีก') | fzf --header '🔐 ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep' --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> '
