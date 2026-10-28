@@ -1,61 +1,19 @@
-﻿# ติดตั้ง ccrm สำหรับ Windows PowerShell
-$ErrorActionPreference = 'Stop'
-
-$raw = 'https://github.com/cznpsk/ccrm/releases/latest/download'
-$dir = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $null }
-$binDir = Join-Path $HOME 'bin'
-New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-
-if (-not (Get-Command fzf -ErrorAction SilentlyContinue)) {
-  Write-Host 'ติดตั้ง fzf ...'
-  if (Get-Command winget -ErrorAction SilentlyContinue) {
-    winget install -e --id junegunn.fzf
-  } else {
-    Write-Host 'ไม่มี winget ในเครื่องนี้ ติดตั้ง fzf เองจาก https://github.com/junegunn/fzf/releases แล้วรัน install.ps1 ใหม่'
-    exit 1
+# ccrm installer for Windows PowerShell - kept ASCII-only on purpose:
+# `irm | iex` in Windows PowerShell 5.1 decodes the script as Latin-1, so a UTF-8 BOM and
+# Thai text turn into garbage. This stub saves install-core.ps1 to a file and runs it with
+# -File, which reads UTF-8 (with BOM) correctly. No `exit` here: under iex it would close the shell.
+$ProgressPreference = 'SilentlyContinue'
+$here = if ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { $null }
+if ($here -and (Test-Path -LiteralPath (Join-Path $here 'install-core.ps1'))) {
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'install-core.ps1')
+} else {
+  $tmp = Join-Path $env:TEMP ('ccrm-install-' + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+  $core = Join-Path $tmp 'install-core.ps1'
+  try {
+    Invoke-WebRequest -UseBasicParsing -OutFile $core -Uri ('https://github.com/cznpsk/ccrm/releases/latest/download/install-core.ps1?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $core
+  } finally {
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
-
-Remove-Item (Join-Path $binDir 'ccrm.ps1') -ErrorAction SilentlyContinue
-foreach ($f in 'ccrm-core.ps1', 'ccrm.cmd') {
-  $dest = Join-Path $binDir $f
-  if ($dir -and (Test-Path (Join-Path $dir $f))) {
-    Copy-Item (Join-Path $dir $f) $dest -Force
-  } else {
-    $ts = [DateTimeOffset]::Now.ToUnixTimeSeconds()
-    Invoke-WebRequest -UseBasicParsing -Uri "$raw/$f`?ts=$ts" -OutFile $dest
-  }
-}
-Write-Host "ติดตั้ง ccrm ไปที่ $binDir แล้ว"
-
-try {
-  $policy = Get-ExecutionPolicy -Scope CurrentUser
-  if ($policy -eq 'Restricted' -or $policy -eq 'AllSigned' -or $policy -eq 'Undefined') {
-    Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
-    Write-Host 'ตั้ง ExecutionPolicy เป็น RemoteSigned (CurrentUser) แล้ว'
-  }
-} catch {
-  Write-Host 'ตั้ง ExecutionPolicy ไม่ได้ (เครื่องนี้อาจล็อกด้วย Group Policy) — ไม่เป็นไร ccrm.cmd ใช้ -ExecutionPolicy Bypass เฉพาะตัวอยู่แล้ว'
-}
-
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if ($userPath -notlike "*$binDir*") {
-  [Environment]::SetEnvironmentVariable('Path', "$userPath;$binDir", 'User')
-  Write-Host "เพิ่ม $binDir เข้า PATH แล้ว (ต้องเปิด terminal ใหม่ถึงจะเห็นผล)"
-}
-
-foreach ($c in 'claude', 'codex') {
-  if (-not (Get-Command $c -ErrorAction SilentlyContinue)) {
-    Write-Host "หมายเหตุ: ยังไม่มี $c CLI ในเครื่องนี้ — ต้องติดตั้งแยกเองก่อนใช้ ccrm resume $c session"
-  }
-}
-
-if (-not (Test-Path (Join-Path $env:LOCALAPPDATA 'ccrm\vault.hc'))) {
-  Write-Host ''
-  Write-Host 'ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep — พิมพ์ ccrm lock-setup'
-}
-
-$verLine = Select-String -LiteralPath (Join-Path $binDir 'ccrm-core.ps1') -Pattern '^\$ver = (\d+)' | Select-Object -First 1
-$installedVer = if ($verLine) { $verLine.Matches[0].Groups[1].Value } else { '?' }
-Write-Host ''
-Write-Host "ติดตั้งเสร็จ v$installedVer — เปิด terminal ใหม่แล้วพิมพ์ ccrm"

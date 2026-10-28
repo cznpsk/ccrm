@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=30
+ver=31
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -27,6 +27,7 @@ vault_links=".codex:codex-data .kimi-code:kimi-data .gemini:gemini-data .claude.
 # ตัวแปรที่ย้ายที่เก็บไปไว้ที่อื่น : ชื่อปกติใน HOME : ชื่อในวอลต์ : ชื่อแสดง
 vault_ext_vars="CLAUDE_CONFIG_DIR:.claude:ext-claude:Claude CODEX_HOME:.codex:ext-codex:Codex"
 sleep_plist="$HOME/Library/LaunchAgents/com.cznpsk.ccrm-sleeplock.plist"
+lid_plist="$HOME/Library/LaunchAgents/com.cznpsk.ccrm-lidlock.plist"
 # ไฟล์ชั่วคราวของ Claude (task output ฯลฯ) ลบตอนล็อก — ไม่อิง HOME เลยเปิดให้ override ตอนเทสต์
 claude_tmp="${CCRM_CLAUDE_TMP:-/private/tmp/claude-$(id -u)}"
 
@@ -280,15 +281,64 @@ _install_wrappers() {
   done
 }
 
+_lid_closed() { ioreg -r -k AppleClamshellState -d 1 2>/dev/null | grep -q '"AppleClamshellState" = Yes'; }
+
+# พับจอแต่เครื่องไม่ sleep (Owly/caffeinate/ต่อจอนอก) sleepwatcher ไม่ทำงาน — เฝ้าฝาจอเองทุก 3 วิ
+# AI ยังรันอยู่ = ยังไม่ล็อก รอให้ปิดไปเองก่อน (ไม่ตัดงานที่ตั้งใจปล่อยรันตอนพับจอ)
+# ลองไม่เกิน 3 ครั้งต่อการพับหนึ่งครั้ง (เว้น 30 วิ) — ปลดล็อกเองระหว่างพับจอ (ต่อจอนอก) จะไม่โดนล็อกซ้ำ
+_lid_watch() {
+  local tries=0 next=0 now
+  cd / || true
+  while sleep 3; do
+    if ! _lid_closed; then tries=0; next=0; continue; fi
+    vault_mounted || continue
+    [[ -n "$(_ai_running)" ]] && continue
+    now=$(date +%s)
+    (( tries < 3 && now >= next )) || continue
+    tries=$((tries + 1)); next=$((now + 30))
+    _vault_lock 1 >/dev/null 2>&1 && tries=3
+  done
+}
+
+_lid_hook() {
+  launchctl bootout "gui/$(id -u)" "$lid_plist" 2>/dev/null
+  rm -f "$lid_plist"
+  [[ "$1" == on ]] || return 0
+  mkdir -p "$(dirname "$lid_plist")"
+  cat > "$lid_plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.cznpsk.ccrm-lidlock</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$HOME/.local/bin/ccrm</string>
+    <string>lid-watch</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+EOF
+  launchctl bootstrap "gui/$(id -u)" "$lid_plist" 2>/dev/null
+  echo "  ✓ ล็อกอัตโนมัติตอนพับจอ (ถ้ายังมี AI รันอยู่ จะรอให้มันปิดเองก่อนค่อยล็อก)"
+}
+
 # ล็อกอัตโนมัติตอนเครื่อง sleep (ปิดฝา) ผ่าน sleepwatcher + LaunchAgent ของเราเอง (ไม่แตะ ~/.sleep ของผู้ใช้)
 _sleep_hook() {
   local mode="$1" sw
   if [[ "$mode" == off ]]; then
     launchctl bootout "gui/$(id -u)" "$sleep_plist" 2>/dev/null
     rm -f "$sleep_plist"
-    echo "ปิดล็อกอัตโนมัติตอน sleep แล้ว"
+    _lid_hook off
+    echo "ปิดล็อกอัตโนมัติ (sleep / พับจอ) แล้ว"
     return 0
   fi
+  _lid_hook on
   sw=$(command -v sleepwatcher || ls /opt/homebrew/sbin/sleepwatcher /usr/local/sbin/sleepwatcher 2>/dev/null | head -1)
   if [[ -z "$sw" ]]; then
     if command -v brew >/dev/null 2>&1; then
@@ -338,6 +388,7 @@ _vault_status() {
   if ! vault_configured; then echo "ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup"; return 0; fi
   if vault_mounted; then echo "🔓 ปลดล็อกอยู่"; else echo "🔒 ล็อกอยู่"; fi
   [[ -f "$sleep_plist" ]] && echo "ล็อกอัตโนมัติตอน sleep: เปิด" || echo "ล็อกอัตโนมัติตอน sleep: ปิด (ccrm lock-auto on)"
+  [[ -f "$lid_plist" ]] && echo "ล็อกอัตโนมัติตอนพับจอ: เปิด" || echo "ล็อกอัตโนมัติตอนพับจอ: ปิด (ccrm lock-auto on)"
   [[ -d "$HOME/.ccrm-plain-backup" ]] && echo "⚠ มีข้อมูลเดิมแบบไม่เข้ารหัสค้างที่ ~/.ccrm-plain-backup — ใช้งานได้ปกติแล้วสั่ง ccrm lock-cleanup"
   return 0
 }
@@ -506,6 +557,7 @@ case "${1:-}" in
   lock-setup)  _vault_setup; exit $? ;;
   lock-status) _vault_status; exit $? ;;
   lock-cleanup) _vault_cleanup; exit $? ;;
+  lid-watch)   _lid_watch; exit $? ;;
   lock-auto)
     if [[ "${2:-}" == off ]]; then _sleep_hook off; else _sleep_hook on; fi
     exit $? ;;
@@ -668,6 +720,8 @@ fi
 # ล็อกอยู่ — ปลดก่อนค่อยโชว์ session (Enter ว่าง = ออก)
 lock_note=""; lock_bind=()
 if vault_configured; then
+  # ตั้งล็อกอัตโนมัติไว้ก่อน v31 (มีแค่ตอน sleep) — เติมตัวเฝ้าพับจอให้เอง
+  [[ -f "$sleep_plist" && ! -f "$lid_plist" ]] && _lid_hook on
   if ! vault_mounted; then
     echo "🔒 session ถูกล็อกอยู่ (Enter ว่าง = ออก)"
     _vault_unlock || exit 1
@@ -686,7 +740,7 @@ elif _is_mac && [[ ! -f "$HOME/.cache/ccrm-lock-nag-off" ]]; then
 fi
 
 reload_cmd="$0 --list ${1:-}"
-hdr="Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก$lock_note$update_note"
+hdr="ccrm v$ver  |  Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก$lock_note$update_note"
 
 # stream เข้า fzf ตรงๆ — UI เปิดทันที รายการทยอยขึ้นระหว่างสแกน (|| true กัน SIGPIPE ตอนผู้ใช้เลือกก่อนสแกนจบ)
 picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t' --with-nth=2.. \

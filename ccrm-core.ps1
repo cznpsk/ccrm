@@ -853,7 +853,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 30
+$ver = 31
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
@@ -912,7 +912,7 @@ if (-not $fzf) {
 
 $scriptPath = $PSCommandPath
 $psBase = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' + $scriptPath + '"'
-$header = "รวม $($rows.Count) sessions  |  Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก$lockNote$updateNote"
+$header = "รวม $($rows.Count) sessions  |  ccrm v$ver  |  Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก$lockNote$updateNote"
 $previewCmd = $psBase + ' -PreviewLine -Line "{r}"'
 $allFlag = if ($All) { ' -All' } else { '' }
 $tabBind = 'tab:transform:' + $psBase + ' -TabTransform -Sel {+1} -Cur {1}' + $allFlag
