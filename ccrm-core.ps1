@@ -203,6 +203,26 @@ function Get-TailTitle([string]$p, [long]$from) {
   return $null
 }
 
+# โฟลเดอร์ที่แชทนั้นทำงาน (cwd) — ไว้บอกว่าโปรเจกต์อยู่ในวอลต์ (เข้ารหัส) หรือไม่
+function Get-SessionCwd($item) {
+  $lines = @()
+  switch ($item.Tag) {
+    'claude' { $lines = Read-FileLines $item.RefPath 40 }
+    'codex' { $lines = Read-FileLines $item.RefPath 5 }
+    'kimi' {
+      try { $st = Read-FileRaw $item.RefPath | ConvertFrom-Json; if ($st.cwd) { return [string]$st.cwd }; return [string]$st.workDir } catch { return '' }
+    }
+    'gemini' {
+      $r = Read-FileRaw (Join-Path (Split-Path -Parent (Split-Path -Parent $item.RefPath)) '.project_root')
+      if ($r) { return $r.Trim() }; return ''
+    }
+  }
+  foreach ($ln in $lines) {
+    if ($ln -match '"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"') { return ($matches[1] -replace '\\\\', '\') }
+  }
+  return ''
+}
+
 function Get-SessionRows([bool]$includeAll) {
   $claudeFiles = @()
   foreach ($r in (Get-Roots 'CLAUDE_CONFIG_DIR' '.claude')) {
@@ -267,6 +287,21 @@ function Get-SessionRows([bool]$includeAll) {
   }
   $newLines = New-Object System.Text.StringBuilder
 
+  # 🔒 หน้าแถวที่โปรเจกต์อยู่ในวอลต์ — ไม่มีวอลต์/ล็อกอยู่ ไม่ต้องดู (cwd ไม่เปลี่ยน cache ตาม path)
+  $vl = Get-VaultLetter
+  $inVault = @()
+  $cwdCache = @{}
+  $cwdFile = $null
+  $cwdNew = New-Object System.Text.StringBuilder
+  if ($vl) {
+    $inVault = @($vl + ':\') + @($vaultLinks.Keys | ForEach-Object { (Join-Path $HOME $_) + '\' })
+    $cwdFile = Join-Path $HOME '.claude\.ccrm\cwd.tsv'
+    foreach ($ln in (Read-FileLines $cwdFile)) {
+      $parts = $ln -split "`t", 2
+      if ($parts.Count -eq 2) { $cwdCache[$parts[0]] = $parts[1] }
+    }
+  }
+
   $rows = @()
   foreach ($item in $items) {
     $sz = Format-Size $item.Bytes
@@ -297,7 +332,16 @@ function Get-SessionRows([bool]$includeAll) {
       $label = $label -replace "[`t`r`n]", ' '
       [void]$newLines.AppendLine($item.RefPath + "`t" + $ck + "`t" + $label)
     }
-    $rows += ($item.Path + "`t" + $item.Tag + "`t" + $dt + "`t" + $sz + "`t" + $label)
+    $lk = '  '
+    if ($vl) {
+      if ($cwdCache.ContainsKey($item.RefPath)) { $cw = $cwdCache[$item.RefPath] }
+      else {
+        $cw = (Get-SessionCwd $item) -replace "[`t`r`n]", ' '
+        if ($cw) { [void]$cwdNew.AppendLine($item.RefPath + "`t" + $cw) }
+      }
+      if ($cw) { foreach ($pre in $inVault) { if (($cw + '\') -like ($pre + '*')) { $lk = '🔒'; break } } }
+    }
+    $rows += ($item.Path + "`t" + $lk + ' ' + $item.Tag + "`t" + $dt + "`t" + $sz + "`t" + $label)
   }
   if ($newLines.Length -gt 0) {
     try {
@@ -306,6 +350,7 @@ function Get-SessionRows([bool]$includeAll) {
       if ($all.Count -gt 5000) { [System.IO.File]::WriteAllLines($cacheFile, $all[-2000..-1]) }
     } catch {}
   }
+  if ($cwdNew.Length -gt 0) { try { [System.IO.File]::AppendAllText($cwdFile, $cwdNew.ToString()) } catch {} }
   return $rows
 }
 
@@ -945,7 +990,7 @@ if ($ListOnly) {
 if ($PreviewLine) {
   $fields = $Line -split "`t"
   $sPath = $fields[0]
-  $tag = $fields[1]
+  $tag = $fields[1].Replace('🔒', '').Trim()
   if ($tag -eq 'kimi') {
     $wirePath = Join-Path $sPath 'agents\main\wire.jsonl'
     $lines = Read-FileLines $wirePath
@@ -988,7 +1033,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 38
+$ver = 39
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
@@ -1070,7 +1115,7 @@ if (-not $picked) {
 
 $fields = $picked -split "`t"
 $spath = $fields[0]
-$tag = $fields[1].Trim()
+$tag = $fields[1].Replace('🔒', '').Trim()
 
 switch ($tag) {
   'codex' {

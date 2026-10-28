@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=38
+ver=39
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -671,6 +671,18 @@ label_of() {
   echo "${t:-(ว่าง)}"
 }
 
+# โฟลเดอร์ที่แชทนั้นทำงาน (cwd) — ไว้บอกว่าโปรเจกต์อยู่ในวอลต์ (เข้ารหัส) หรือไม่
+_cwd_of() {
+  local f="$1" tag="$2" c=""
+  case "$tag" in
+    claude*) c=$(head -c 300000 "$f" 2>/dev/null | grep -m1 -o '"cwd":"[^"]*"' | sed 's/^"cwd":"//;s/"$//') ;;
+    codex*)  c=$(head -c 100000 "$f" 2>/dev/null | grep -m1 -o '"cwd":"[^"]*"' | sed 's/^"cwd":"//;s/"$//') ;;
+    kimi*)   c=$(jq -r '.cwd // .workDir // empty' "$f" 2>/dev/null) ;;
+    gemini*) c=$(cat "$(dirname "$(dirname "$f")")/.project_root" 2>/dev/null) ;;
+  esac
+  printf '%s' "$c"
+}
+
 _list() {
   local files r
   # tag<TAB>path — ค่ายดูจากที่มา ไม่ใช่ชื่อ path (ที่เก็บที่ตั้งผ่านตัวแปรไม่มี .codex ใน path)
@@ -693,6 +705,11 @@ _list() {
     fi
   fi
   mkdir -p "$(dirname "$label_cache")"; touch "$label_cache"
+  # 🔒 หน้าแถวที่โปรเจกต์อยู่ในวอลต์ — ไม่มีวอลต์/ล็อกอยู่ ไม่ต้องดู (cwd ไม่เปลี่ยน cache ตาม path)
+  local vault_on="" cwd_cache="" cw lk
+  if vault_configured && vault_mounted; then
+    vault_on=1; cwd_cache="$vault_mp/.ccrm/cwd.tsv"; touch "$cwd_cache"
+  fi
   # codex rename เขียนแค่ session_index.jsonl ไม่แตะไฟล์ session — ผูก key กับ mtime ของ index ด้วย
   local codex_idx_ep="" ix
   for r in "${codex_roots[@]}"; do
@@ -730,9 +747,18 @@ _list() {
       [[ -n "$lbl" ]] || lbl=$(label_of "$f" "$tag" | tr '\t\n' '  ')
       printf '%s\t%s\t%s\n' "$f" "$ck" "$lbl" >> "$label_cache"
     fi
+    lk="  "
+    if [[ -n "$vault_on" ]]; then
+      cw=$(grep -F "$f"$'\t' "$cwd_cache" | head -1 | cut -f2-)
+      if [[ -z "$cw" ]]; then
+        cw=$(_cwd_of "$f" "$tag" | tr '\t\n' '  ')
+        [[ -n "$cw" ]] && printf '%s\t%s\n' "$f" "$cw" >> "$cwd_cache"
+      fi
+      [[ "$cw" == "$vault_mp" || "$cw" == "$vault_mp/"* ]] && lk="🔒"
+    fi
     sz=$(du -sh "$out" 2>/dev/null | cut -f1)
     dt=$(_mtime_fmt "$f")
-    printf '%s\t%s\t%s\t%7s\t%s\n' "$out" "$tag" "$dt" "$sz" "$lbl"
+    printf '%s\t%s %s\t%s\t%7s\t%s\n' "$out" "$lk" "$tag" "$dt" "$sz" "$lbl"
   done <<< "$files_sorted"
 
   # กัน cache โตไม่จำกัด
@@ -797,9 +823,9 @@ picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t'
   --header="กำลังโหลด...  |  $CCRM_H1"$'\n'"$CCRM_H2" \
   --bind 'load:transform-header:printf "%s\n%s" "รวม $FZF_TOTAL_COUNT sessions  |  $CCRM_H1" "$CCRM_H2"' \
   --preview 'f={1}; case {2} in
-    codex*) head -c 500000 "$f" | jq -r "select(.type==\"response_item\" and .payload.role==\"user\") | .payload.content[]? | select(.type==\"input_text\") | .text | select(startswith(\"<\")|not)" 2>/dev/null ;;
-    kimi*) jq -r "select(.type==\"turn.prompt\" and .origin.kind==\"user\") | .input[]? | select(.type==\"text\") | .text" "$f/agents/main/wire.jsonl" 2>/dev/null ;;
-    gemini*) jq -r ".messages[]? | select(.type==\"user\") | .content[]? | select(.text) | .text" "$f" 2>/dev/null ;;
+    *codex*) head -c 500000 "$f" | jq -r "select(.type==\"response_item\" and .payload.role==\"user\") | .payload.content[]? | select(.type==\"input_text\") | .text | select(startswith(\"<\")|not)" 2>/dev/null ;;
+    *kimi*) jq -r "select(.type==\"turn.prompt\" and .origin.kind==\"user\") | .input[]? | select(.type==\"text\") | .text" "$f/agents/main/wire.jsonl" 2>/dev/null ;;
+    *gemini*) jq -r ".messages[]? | select(.type==\"user\") | .content[]? | select(.text) | .text" "$f" 2>/dev/null ;;
     *) head -c 300000 "$f" | jq -r "select(.type==\"user\" and (.isMeta!=true)) | .message.content | if type==\"string\" then . else ([.[]|select(.type==\"text\")|.text]|join(\" \")) end" 2>/dev/null ;;
   esac | grep -v "^<" | head -30' \
   --preview-window=right:50%:wrap \
@@ -814,7 +840,7 @@ picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t'
 [[ -n "$picked" ]] || exit 0
 
 spath=$(echo "$picked" | cut -f1)
-tag=$(echo "$picked" | cut -f2 | tr -d ' ')
+tag=$(echo "$picked" | cut -f2 | tr -d ' '); tag="${tag#🔒}"
 
 case "$tag" in
   codex)
