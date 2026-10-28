@@ -424,6 +424,31 @@ function Set-PrivateAcl([string]$dir, [bool]$repair) {
   & icacls (Join-Path $dir '*') /reset /T /C /Q 2>$null | Out-Null
 }
 
+# codex ตรวจ app-server-daemon เข้มมาก (codex-rs/uds/src/windows_socket_validation.rs): เจ้าของ = เรา,
+# DACL protected, ACE เดียว allow เรา FullControl (OI)(CI) — ตอนสร้างเองตั้งให้ แต่ย้ายเข้าวอลต์แล้ว ACL ไม่ติดมา
+# มีอยู่แล้วแต่ผิด = codex ไม่ยอมเปิด ("socket directory is not private to the current user")
+function Repair-CodexDaemonDir([string]$codexDir) {
+  $d = Join-Path $codexDir 'app-server-daemon'
+  if (-not (Test-Path -LiteralPath $d -PathType Container)) { return }
+  $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  try {
+    $acl = Get-Acl -LiteralPath $d
+    $rules = @($acl.Access)
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier])
+    if ($acl.AreAccessRulesProtected -and $owner -eq $me -and $rules.Count -eq 1 -and
+      $rules[0].IdentityReference.Translate([Security.Principal.SecurityIdentifier]) -eq $me -and
+      $rules[0].FileSystemRights -eq 'FullControl' -and $rules[0].AccessControlType -eq 'Allow' -and
+      $rules[0].InheritanceFlags -eq 'ContainerInherit, ObjectInherit' -and $rules[0].PropagationFlags -eq 'None') { return }
+  } catch {}
+  try {
+    $sec = New-Object System.Security.AccessControl.DirectorySecurity
+    $sec.SetOwner($me)
+    $sec.SetAccessRuleProtection($true, $false)
+    $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+    (Get-Item -LiteralPath $d -Force).SetAccessControl($sec)
+  } catch { Write-Host "  ! ตั้งสิทธิ์ $d ไม่ได้: $($_.Exception.Message)" }
+}
+
 # ทุกโฟลเดอร์ของค่ายในวอลต์ (รวมที่เก็บนอกที่ปกติ ext-*)
 # ครั้งแรกบนวอลต์นี้ (ไม่มี marker) รีเซ็ตไส้ในทั้งต้นด้วย — ซ่อมไฟล์ที่ v35 ทำ ACL ว่างไว้
 function Protect-VaultDirs([string]$letter) {
@@ -433,6 +458,7 @@ function Protect-VaultDirs([string]$letter) {
   if ($repair) { Write-Host 'กำลังตั้งสิทธิ์ไฟล์ในวอลต์ (ครั้งเดียว อาจใช้เวลาสักครู่) ...' }
   foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue)) {
     if ($d.Name -in @($vaultLinks.Values) -or $d.Name -like 'ext-*') { Set-PrivateAcl $d.FullName $repair }
+    if ($d.Name -eq 'codex-data' -or $d.Name -eq 'ext-codex') { Repair-CodexDaemonDir $d.FullName }
   }
   if ($repair) { try { [System.IO.File]::WriteAllText($marker, '1') } catch {} }
 }
@@ -952,7 +978,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 36
+$ver = 37
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
