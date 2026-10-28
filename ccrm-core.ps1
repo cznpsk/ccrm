@@ -634,12 +634,30 @@ function Install-VeraCrypt {
     $w = & winget show -e --id IDRIX.VeraCrypt --disable-interactivity 2>$null | Out-String
     if ($w -match 'VeraCrypt_Setup_x64_([\d.]+)\.msi') { $vcVer = $matches[1] }
   } catch {}
-  # [string] — Join-Path คืน PSObject ห่อ string ส่งเข้า COM แล้วได้ type mismatch
-  $msi = [string](Join-Path $env:TEMP "VeraCrypt_Setup_${a}_$vcVer.msi")
-  Write-Host "ดาวน์โหลด VeraCrypt $vcVer ($a) ..."
-  try {
-    Invoke-WebRequest -UseBasicParsing -Uri "https://launchpad.net/veracrypt/trunk/$vcVer/+download/VeraCrypt_Setup_${a}_$vcVer.msi" -OutFile $msi
-  } catch { Write-Host "ดาวน์โหลดไม่สำเร็จ: $($_.Exception.Message)"; return $false }
+  # ลองหลายแหล่ง: GitHub (เร็ว) → Launchpad — บางเวอร์ชันไม่มี MSI บน GitHub (1.26.30 = 404) เลยมีรุ่นสำรอง
+  # curl.exe (มีใน Win10+) โชว์ความคืบหน้า + ตัดเมื่อช้าค้าง — IWR เงียบจนดูเหมือนแฮงก์
+  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+  $msi = $null
+  foreach ($v in @($vcVer, '1.26.29') | Select-Object -Unique) {
+    $name = "VeraCrypt_Setup_${a}_$v.msi"
+    # [string] — Join-Path คืน PSObject ห่อ string ส่งเข้า COM แล้วได้ type mismatch
+    $out = [string](Join-Path $env:TEMP $name)
+    foreach ($u in "https://github.com/veracrypt/VeraCrypt/releases/download/VeraCrypt_$v/$name", "https://launchpad.net/veracrypt/trunk/$v/+download/$name") {
+      Write-Host "ดาวน์โหลด VeraCrypt $v ($a) จาก $(([uri]$u).Host) ..."
+      Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+      try {
+        if ($curl) {
+          & $curl.Source -fL --progress-bar --connect-timeout 20 --speed-time 30 --speed-limit 20000 -o $out $u
+          if ($LASTEXITCODE -ne 0) { throw "curl exit $LASTEXITCODE" }
+        } else {
+          Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri $u -OutFile $out
+        }
+        if ((Get-Item -LiteralPath $out).Length -gt 1MB) { $msi = $out; break }
+      } catch { Write-Host "  ไม่สำเร็จ ($($_.Exception.Message)) — ลองแหล่งถัดไป" }
+    }
+    if ($msi) { break }
+  }
+  if (-not $msi) { Write-Host 'ดาวน์โหลด VeraCrypt ไม่สำเร็จทุกแหล่ง — เช็คเน็ตแล้วรัน ccrm lock-setup ใหม่'; return $false }
   # ไฟล์ต้องเซ็นโดย IDRIX จริง — กันโดนสลับไฟล์ระหว่างทาง
   $sig = Get-AuthenticodeSignature -FilePath $msi
   if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'CN=IDRIX') {
@@ -853,7 +871,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 31
+$ver = 32
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
