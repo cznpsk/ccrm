@@ -678,14 +678,29 @@ label_of() {
 }
 
 # โฟลเดอร์ที่แชทนั้นทำงาน (cwd) — ไว้บอกว่าโปรเจกต์อยู่ในวอลต์ (เข้ารหัส) หรือไม่
-_cwd_of() {
-  local f="$1" tag="$2" c=""
+# ทุกโฟลเดอร์ที่แชทเคยทำงาน "จำนวนครั้ง<TAB>path" มากไปน้อย — ไม่นับ ~ และที่เก็บแชท (~/.claude/projects/...)
+# แชทส่วนใหญ่เริ่มจาก ~ แล้วค่อย cd เข้าโปรเจกต์ ดูแค่ cwd แรกจะได้ ~ เสมอ
+_cwds_of() {
+  local f="$1" tag="$2"
   case "$tag" in
-    # cwd อาจอยู่ลึกเป็น MB (มี snapshot ใหญ่ขึ้นก่อน) — grep -m1 หยุดที่เจอแรกเอง ไม่ต้องจำกัดขนาด
-    claude*|codex*) c=$(LC_ALL=C grep -m1 -o '"cwd":"[^"]*"' "$f" 2>/dev/null | sed 's/^"cwd":"//;s/"$//') ;;
-    kimi*)   c=$(jq -r '.cwd // .workDir // empty' "$f" 2>/dev/null) ;;
-    gemini*) c=$(cat "$(dirname "$(dirname "$f")")/.project_root" 2>/dev/null) ;;
-  esac
+    claude*|codex*) LC_ALL=C grep -o '"cwd":"[^"]*"' "$f" 2>/dev/null | sed 's/^"cwd":"//;s/"$//' ;;
+    kimi*)   jq -r '.cwd // .workDir // empty' "$f" 2>/dev/null ;;
+    gemini*) cat "$(dirname "$(dirname "$f")")/.project_root" 2>/dev/null; echo ;;
+  esac | grep -v '^$' | sort | uniq -c | sort -rn | awk '{c=$1; sub(/^ *[0-9]+ /,""); print c "\t" $0}' |
+    while IFS=$'\t' read -r c d; do
+      d="${d#file://}"; d="${d//%20/ }"; d="${d%/}"   # codex บางรุ่นเก็บเป็น file:// URI
+      [[ "$d" == "$HOME" || "$d" == "$vault_mp" || "$d" == "$vault_mp/projects" || "$d" == "$vault_mp/projects/"* || "$d" == "$vault_mp/.ccrm"* ]] && continue
+      printf '%s\t%s\n' "$c" "$d"
+    done
+}
+
+# โฟลเดอร์หลักของแชท = ที่ใช้บ่อยที่สุด (ไม่มีโฟลเดอร์อื่นเลย = ~)
+_cwd_of() {
+  local c
+  c=$(_cwds_of "$1" "$2" | head -1 | cut -f2-)
+  if [[ -z "$c" && ( "$2" == claude* || "$2" == codex* ) ]]; then
+    c=$(LC_ALL=C grep -m1 -o '"cwd":"[^"]*"' "$1" 2>/dev/null | sed 's/^"cwd":"//;s/"$//')
+  fi
   printf '%s' "$c"
 }
 
@@ -715,9 +730,9 @@ _list() {
   # ไอคอนหน้าแถว: 🔒 = ไฟล์แชทอยู่ในวอลต์, 📁 = โฟลเดอร์โปรเจกต์ (cwd) อยู่ในวอลต์ด้วย
   # ไม่มีวอลต์/ล็อกอยู่ ไม่ต้องดู · cwd ของแชทไม่เปลี่ยน cache ตาม path
   # cwd ใช้ทั้งไอคอนและบรรทัด 📂 บนหัว — cache อยู่ในวอลต์ถ้ามี (path โปรเจกต์ไม่ควรหลุดออกมา)
-  local vault_on="" cwd_cache="$HOME/.cache/ccrm-cwd2.tsv" cw cwd_show rp ic enc_roots="" r
+  local vault_on="" cwd_cache="$HOME/.cache/ccrm-cwd3.tsv" cw cwd_show rp ic enc_roots="" r
   if vault_configured && vault_mounted; then
-    vault_on=1; cwd_cache="$vault_mp/.ccrm/cwd2.tsv"
+    vault_on=1; cwd_cache="$vault_mp/.ccrm/cwd3.tsv"
     # ที่เก็บแชทที่ปลายทางจริงอยู่ในวอลต์ (~/.codex เป็น symlink เข้าไป) — คิดครั้งเดียวต่อที่เก็บ
     for r in "${claude_roots[@]}" "${codex_roots[@]}" "$HOME/.kimi-code" "$HOME/.gemini"; do
       rp=$(cd -P "$r" 2>/dev/null && pwd)
@@ -863,31 +878,66 @@ _ui_close_prompt() {   # ปิดกรอบ + รอ Enter แล้วออ
 _ask_y() { local a; printf '  %s│%s\n  %s│%s  %s%s%s' "$_c_c" "$_c_0" "$_c_c" "$_c_0" "$_c_y" "$1" "$_c_0" > /dev/tty; read -r a < /dev/tty; [[ "$a" =~ ^[Yy] ]]; }
 
 # $1 = path จากแถว (ไฟล์แชท / โฟลเดอร์ kimi) $2 = ช่อง tag (มีไอคอนปน)
+# สถานะของโฟลเดอร์หนึ่งอัน: out=ย้ายคืนได้ in=อยู่ในวอลต์แล้ว deny gone ok
+_proj_state() {
+  local d="$1" rp
+  [[ -e "$d" || -L "$d" ]] || { echo gone; return; }
+  rp=$(cd -P "$d" 2>/dev/null && pwd)
+  if [[ -L "$d" && "$rp" == "$proj_dir/"* ]]; then echo out; return; fi
+  if [[ "$rp" == "$vault_mp" || "$rp" == "$vault_mp/"* ]]; then echo in; return; fi
+  if _proj_denied "$rp"; then echo deny; return; fi
+  echo ok
+}
+
+# $1 = path จากแถว (ไฟล์แชท / โฟลเดอร์ kimi) $2 = ช่อง tag (มีไอคอนปน)
 _project_move() {
-  local f="$1" tag cw p rp
+  local f="$1" tag list n=0 c d st txt pick sel=() states=()
   tag=$(printf '%s' "$2" | LC_ALL=C tr -dc 'a-z')
   [[ "$tag" == kimi ]] && f="$f/state.json"
   if ! vault_configured || ! vault_mounted; then _say "ต้องตั้งค่าล็อกและปลดล็อกอยู่ก่อน (ccrm lock-setup / ccrm unlock)"; return 1; fi
-  cw=$(_cwd_of "$f" "$tag")
-  [[ -n "$cw" ]] || { _say "แชทนี้ไม่ได้บันทึกโฟลเดอร์ที่ทำงานไว้ — ย้ายไม่ได้"; return 1; }
-  [[ -e "$cw" || -L "$cw" ]] || { _say "ไม่พบโฟลเดอร์ $cw (ถูกลบหรือย้ายไปแล้ว)"; return 1; }
-  rp=$(cd -P "$cw" 2>/dev/null && pwd)
-  if [[ -L "$cw" && ( "$rp" == "$proj_dir/"* ) ]]; then
-    _project_out "$cw"; return $?
-  fi
-  [[ "$rp" == "$vault_mp" || "$rp" == "$vault_mp/"* ]] && { _say "โฟลเดอร์นี้อยู่ในวอลต์อยู่แล้ว ($rp)"; return 1; }
-  [[ -L "$cw" ]] && { _say "$cw เป็นลิงก์ไปที่อื่น ($rp) — ย้ายโฟลเดอร์ปลายทางเองแทน"; return 1; }
-  p="$rp"
-  if _proj_denied "$p"; then
-    _say "📂 โฟลเดอร์ของแชทนี้:  $_c_b${p/#$HOME/~}$_c_0   $_c_d($p)$_c_0"
+  _say "${_c_d}กำลังดูว่าแชทนี้ทำงานในโฟลเดอร์ไหนบ้าง ...$_c_0"
+  list=$(_cwds_of "$f" "$tag" | head -6)
+  if [[ -z "$list" ]]; then
     _say ""
-    _say "${_c_r}⛔ ย้ายไม่ได้ — เป็นโฟลเดอร์ใหญ่/โฟลเดอร์ระบบ$_c_0"
-    [[ "$p" == "$HOME" ]] && _say "   นี่คือโฟลเดอร์ผู้ใช้ทั้งก้อน (มีทุกอย่างของคุณ) ย้ายเข้าวอลต์ไม่ได้"
-    _say "   ย้ายได้เฉพาะโฟลเดอร์โปรเจกต์ เช่น ~/Downloads/Projects/ชื่อโปรเจกต์"
-    _say ""
+    _say "📂 แชทนี้ทำงานแค่ใน ~ ($HOME)"
+    _say "${_c_r}⛔ ย้ายไม่ได้ — ~ คือโฟลเดอร์ผู้ใช้ทั้งก้อน$_c_0"
     _say "   ${_c_d}ทางแก้: cd เข้าโฟลเดอร์โปรเจกต์ก่อน แล้วค่อยเริ่มแชทใหม่ — แชทนั้นจะย้ายได้$_c_0"
     return 1
   fi
+  _say ""
+  _say "${_c_b}โฟลเดอร์ที่แชทนี้ใช้ทำงาน$_c_0"
+  _say ""
+  while IFS=$'\t' read -r c d; do
+    n=$((n + 1)); sel[$n]="$d"; st=$(_proj_state "$d"); states[$n]="$st"
+    case "$st" in
+      ok)   txt="${_c_g}ย้ายเข้าวอลต์ได้$_c_0" ;;
+      out)  txt="🔒 ย้ายเข้าวอลต์แล้ว ${_c_g}(ย้ายคืนได้)$_c_0" ;;
+      in)   txt="🔒 อยู่ในวอลต์อยู่แล้ว" ;;
+      deny) txt="${_c_r}⛔ โฟลเดอร์ใหญ่/ระบบ ห้ามย้าย$_c_0" ;;
+      gone) txt="${_c_d}ไม่มีโฟลเดอร์นี้แล้ว$_c_0" ;;
+    esac
+    _say " $_c_b$n.$_c_0 ${d/#$HOME/~}"
+    _say "      ${_c_d}ใช้ $c ครั้ง ·$_c_0 $txt"
+  done <<< "$list"
+  _ask_y_num() { local a; printf '  %s│%s\n  %s│%s  %s%s%s' "$_c_c" "$_c_0" "$_c_c" "$_c_0" "$_c_y" "$1" "$_c_0" > /dev/tty; read -r a < /dev/tty; printf '%s' "$a"; }
+  pick=$(_ask_y_num "เลือกเลขโฟลเดอร์ (Enter เฉยๆ = ยกเลิก): ")
+  [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= n )) || { _say "ยกเลิก — ไม่ได้แตะอะไร"; return 1; }
+  d="${sel[$pick]}"
+  _say ""
+  case "${states[$pick]}" in
+    out)  _project_out "$d"; return $? ;;
+    in)   _say "🔒 ${d/#$HOME/~} อยู่ในวอลต์อยู่แล้ว (ไม่ได้ย้ายผ่าน Ctrl-E เลยไม่มีลิงก์ให้ย้ายคืน)"; return 0 ;;
+    deny) _say "${_c_r}⛔ ${d/#$HOME/~} เป็นโฟลเดอร์ใหญ่/โฟลเดอร์ระบบ — ย้ายได้แค่โฟลเดอร์โปรเจกต์$_c_0"; return 1 ;;
+    gone) _say "ไม่พบโฟลเดอร์ ${d/#$HOME/~} แล้ว (ถูกลบหรือย้ายไป)"; return 1 ;;
+  esac
+  _project_in "$d"
+}
+
+# ย้ายโฟลเดอร์ $1 เข้าวอลต์ (ผ่านการเช็ค _proj_state = ok แล้ว)
+_project_in() {
+  local cw="$1" p
+  [[ -L "$cw" ]] && { _say "$cw เป็นลิงก์ไปที่อื่น — ย้ายโฟลเดอร์ปลายทางเองแทน"; return 1; }
+  p=$(cd -P "$cw" 2>/dev/null && pwd)
   local m found="" sig n kb vfree name dst bk busy
   for m in $_proj_markers; do [[ -e "$p/$m" ]] && { found="$m"; break; }; done
   _say "กำลังตรวจขนาด ..."
