@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=40
+ver=41
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
