@@ -899,7 +899,6 @@ _project_move() {
   fi
   _proj_record add "$p" "$dst"
   echo "✓ ย้ายแล้ว — ${p/#$HOME/~} → ${dst/#$HOME/~} ($n ไฟล์)"
-  sleep 1
 }
 
 # ย้ายคืนออกจากวอลต์ ($1 = path เดิมที่ตอนนี้เป็นลิงก์)
@@ -933,11 +932,14 @@ _project_out() {
   rm -rf "$dst"
   _proj_record del "$p"
   echo "✓ ย้ายคืนแล้ว — ${p/#$HOME/~} ($n ไฟล์)"
-  sleep 1
 }
 
 case "${1:-}" in
-  project-move) _project_move "${2:-}" "${3:-}"; exit $? ;;
+  project-move)
+    # เรียกจาก Ctrl-E ใน fzf — พอจบ fzf วาดรายการทับทันที ต้องค้างข้อความไว้ให้อ่าน
+    _project_move "${2:-}" "${3:-}"; rc=$?
+    printf '\nกด Enter เพื่อกลับไปที่รายการ ' > /dev/tty; read -r _ < /dev/tty
+    exit $rc ;;
   project-out)  _project_out "${2:-}"; exit $? ;;
 esac
 
