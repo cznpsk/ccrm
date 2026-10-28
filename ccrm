@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=26
+ver=27
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -487,7 +487,17 @@ latest=$(cat "$ver_cache" 2>/dev/null | tr -d '[:space:]')
 update_note=""
 [[ "$latest" =~ ^[0-9]+$ ]] && (( latest > ver )) && update_note="  |  ⬆ v$latest มาแล้ว"
 
-base="$HOME/.claude/projects"
+# ที่เก็บ session ทุกที่: ที่ปกติ + ที่ตั้งผ่าน CLAUDE_CONFIG_DIR / CODEX_HOME (ถ้าเป็นที่อื่น) — โชว์ครบทุกที่
+_env_root() {
+  local p="${!1:-}"
+  [[ -n "$p" ]] || return 0
+  [[ "$p" == "~/"* ]] && p="$HOME/${p#\~/}"
+  while [[ "$p" == */ && "$p" != / ]]; do p="${p%/}"; done
+  [[ "$p" == "$2" ]] || echo "$p"
+}
+claude_roots=("$HOME/.claude"); codex_roots=("$HOME/.codex")
+r=$(_env_root CLAUDE_CONFIG_DIR "$HOME/.claude"); [[ -n "$r" ]] && claude_roots+=("$r")
+r=$(_env_root CODEX_HOME "$HOME/.codex"); [[ -n "$r" ]] && codex_roots+=("$r")
 os="$(uname)"
 
 if [[ "$os" == "Darwin" ]]; then
@@ -500,27 +510,30 @@ else
   _size_bytes()  { stat -c '%s' "$1"; }
 fi
 
+# root ของไฟล์ codex (ตัดตั้งแต่ /sessions/ หรือ /archived_sessions/)
+_codex_root() { local r="${1%/archived_sessions/*}"; [[ "$r" == "$1" ]] && r="${1%/sessions/*}"; echo "$r"; }
+
 label_of() {
-  local f="$1" t=""
-  case "$f" in
-    */.codex/*)
+  local f="$1" tag="$2" t=""
+  case "$tag" in
+    codex*)
       local id
       id=$(basename "$f" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
-      t=$(grep -F "\"$id\"" "$HOME/.codex/session_index.jsonl" 2>/dev/null | tail -1 | jq -r '.thread_name // empty' 2>/dev/null)
+      t=$(grep -F "\"$id\"" "$(_codex_root "$f")/session_index.jsonl" 2>/dev/null | tail -1 | jq -r '.thread_name // empty' 2>/dev/null)
       if [[ -z "$t" ]]; then
         t=$(head -c 500000 "$f" | jq -r 'select(.type=="response_item" and .payload.role=="user") | .payload.content[]? | select(.type=="input_text") | .text | select(startswith("<")|not)' 2>/dev/null \
             | head -1)
       fi
       t="${t:0:70}"
       ;;
-    */.kimi-code/*)
+    kimi*)
       t=$(jq -r '.title // empty' "$f" 2>/dev/null)
       if [[ -z "$t" || "$t" == "New Session" ]]; then
         t=$(jq -r 'select(.type=="turn.prompt" and .origin.kind=="user") | .input[]? | select(.type=="text") | .text' "$(dirname "$f")/agents/main/wire.jsonl" 2>/dev/null | head -1)
       fi
       t="${t:0:70}"
       ;;
-    */.gemini/*)
+    gemini*)
       t=$(jq -r '.messages[]? | select(.type=="user") | .content[]? | select(.text) | .text' "$f" 2>/dev/null | head -1)
       t="${t:0:70}"
       ;;
@@ -536,12 +549,14 @@ label_of() {
 }
 
 _list() {
-  local claude_files codex_files kimi_files gemini_files files
-  claude_files=$(find "$base" -mindepth 2 -maxdepth 2 -name '*.jsonl' -type f 2>/dev/null)
-  codex_files=$(find "$HOME/.codex/sessions" "$HOME/.codex/archived_sessions" -name '*.jsonl' -type f 2>/dev/null)
-  kimi_files=$(find "$HOME/.kimi-code/sessions" -mindepth 3 -maxdepth 3 -name 'state.json' -type f 2>/dev/null)
-  gemini_files=$(find "$HOME/.gemini/tmp" -mindepth 2 -path '*/chats/*' -name '*.json' -type f 2>/dev/null)
-  files=$(printf '%s\n%s\n%s\n%s\n' "$claude_files" "$codex_files" "$kimi_files" "$gemini_files" | grep -v '^$')
+  local files r
+  # tag<TAB>path — ค่ายดูจากที่มา ไม่ใช่ชื่อ path (ที่เก็บที่ตั้งผ่านตัวแปรไม่มี .codex ใน path)
+  files=$(
+    for r in "${claude_roots[@]}"; do find "$r/projects" -mindepth 2 -maxdepth 2 -name '*.jsonl' -type f 2>/dev/null | sed 's/^/claude\t/'; done
+    for r in "${codex_roots[@]}"; do find "$r/sessions" "$r/archived_sessions" -name '*.jsonl' -type f 2>/dev/null | sed 's/^/codex \t/'; done
+    find "$HOME/.kimi-code/sessions" -mindepth 3 -maxdepth 3 -name 'state.json' -type f 2>/dev/null | sed 's/^/kimi  \t/'
+    find "$HOME/.gemini/tmp" -mindepth 2 -path '*/chats/*' -name '*.json' -type f 2>/dev/null | sed 's/^/gemini\t/'
+  )
   [[ -n "$files" ]] || return 0
 
   # cache ชื่อ session ตาม path+mtime — ไฟล์ใหญ่หลักร้อย MB สแกนหา customTitle ครั้งเดียวพอ
@@ -556,23 +571,22 @@ _list() {
   fi
   mkdir -p "$(dirname "$label_cache")"; touch "$label_cache"
   # codex rename เขียนแค่ session_index.jsonl ไม่แตะไฟล์ session — ผูก key กับ mtime ของ index ด้วย
-  local codex_idx_ep=""
-  [[ -f "$HOME/.codex/session_index.jsonl" ]] && codex_idx_ep=$(_mtime_epoch "$HOME/.codex/session_index.jsonl")
+  local codex_idx_ep="" ix
+  for r in "${codex_roots[@]}"; do
+    ix="$r/session_index.jsonl"
+    [[ -f "$ix" ]] && codex_idx_ep="$codex_idx_ep$(_mtime_epoch "$ix")"
+  done
 
   # sort ตาม mtime ก่อน (stat อย่างเดียว เร็ว) แล้วค่อยทยอยคำนวณ label — จะได้ stream ออกทีละแถวแบบเรียงแล้ว
   local files_sorted
-  files_sorted=$(while IFS= read -r f; do
-    [[ -e "$f" ]] && printf '%s\t%s\n' "$(_mtime_epoch "$f")" "$f"
+  files_sorted=$(while IFS=$'\t' read -r tag f; do
+    [[ -e "$f" ]] && printf '%s\t%s\t%s\n' "$(_mtime_epoch "$f")" "$tag" "$f"
   done <<< "$files" | sort -rn)
 
-  while IFS=$'\t' read -r ep f; do
+  while IFS=$'\t' read -r ep tag f; do
     [[ -n "$f" ]] || continue
-    case "$f" in
-      */.codex/*)     tag="codex "; out="$f" ;;
-      */.kimi-code/*) tag="kimi  "; out="$(dirname "$f")" ;;
-      */.gemini/*)    tag="gemini"; out="$f" ;;
-      *)              tag="claude"; out="$f" ;;
-    esac
+    out="$f"
+    [[ "$tag" == kimi* ]] && out="$(dirname "$f")"
     case "$tag" in
       claude) ck=$(_size_bytes "$f") ;;        # jsonl append-only — key ตาม size ไว้สแกนเฉพาะส่วนงอก
       "codex ") ck="$ep-$codex_idx_ep" ;;
@@ -590,7 +604,7 @@ _list() {
           lbl="${nt:-$(printf '%s' "$prev" | cut -f3-)}"
         fi
       fi
-      [[ -n "$lbl" ]] || lbl=$(label_of "$f" | tr '\t\n' '  ')
+      [[ -n "$lbl" ]] || lbl=$(label_of "$f" "$tag" | tr '\t\n' '  ')
       printf '%s\t%s\t%s\n' "$f" "$ck" "$lbl" >> "$label_cache"
     fi
     sz=$(du -sh "$out" 2>/dev/null | cut -f1)
@@ -646,10 +660,10 @@ hdr="Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้�
 picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t' --with-nth=2.. \
   --header="กำลังโหลด...  |  $hdr" \
   --bind "load:transform-header:echo \"รวม \$FZF_TOTAL_COUNT sessions  |  $hdr\"" \
-  --preview 'f={1}; case "$f" in
-    */.codex/*) head -c 500000 "$f" | jq -r "select(.type==\"response_item\" and .payload.role==\"user\") | .payload.content[]? | select(.type==\"input_text\") | .text | select(startswith(\"<\")|not)" 2>/dev/null ;;
-    */.kimi-code/*) jq -r "select(.type==\"turn.prompt\" and .origin.kind==\"user\") | .input[]? | select(.type==\"text\") | .text" "$f/agents/main/wire.jsonl" 2>/dev/null ;;
-    */.gemini/*) jq -r ".messages[]? | select(.type==\"user\") | .content[]? | select(.text) | .text" "$f" 2>/dev/null ;;
+  --preview 'f={1}; case {2} in
+    codex*) head -c 500000 "$f" | jq -r "select(.type==\"response_item\" and .payload.role==\"user\") | .payload.content[]? | select(.type==\"input_text\") | .text | select(startswith(\"<\")|not)" 2>/dev/null ;;
+    kimi*) jq -r "select(.type==\"turn.prompt\" and .origin.kind==\"user\") | .input[]? | select(.type==\"text\") | .text" "$f/agents/main/wire.jsonl" 2>/dev/null ;;
+    gemini*) jq -r ".messages[]? | select(.type==\"user\") | .content[]? | select(.text) | .text" "$f" 2>/dev/null ;;
     *) head -c 300000 "$f" | jq -r "select(.type==\"user\" and (.isMeta!=true)) | .message.content | if type==\"string\" then . else ([.[]|select(.type==\"text\")|.text]|join(\" \")) end" 2>/dev/null ;;
   esac | grep -v "^<" | head -30' \
   --preview-window=right:50%:wrap \
@@ -669,6 +683,9 @@ tag=$(echo "$picked" | cut -f2 | tr -d ' ')
 case "$tag" in
   codex)
     id=$(basename "$spath" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+    # เปิดด้วยที่เก็บที่ session นั้นอยู่ (ที่ปกติหรือที่ตั้งผ่าน CODEX_HOME)
+    root=$(_codex_root "$spath")
+    if [[ "$root" == "$HOME/.codex" ]]; then unset CODEX_HOME; else export CODEX_HOME="$root"; fi
     exec codex resume "$id" --yolo
     ;;
   kimi)
@@ -685,6 +702,8 @@ case "$tag" in
     ;;
   *)
     id=$(basename "$spath" .jsonl)
+    root=$(dirname "$(dirname "$(dirname "$spath")")")
+    if [[ "$root" == "$HOME/.claude" ]]; then unset CLAUDE_CONFIG_DIR; else export CLAUDE_CONFIG_DIR="$root"; fi
     exec claude --resume "$id" --dangerously-skip-permissions
     ;;
 esac

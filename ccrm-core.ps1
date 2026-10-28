@@ -102,11 +102,26 @@ function Get-ClaudeLabel([string]$sPath) {
   return '(ว่าง)'
 }
 
+# ที่เก็บ session ทุกที่: ที่ปกติ + ที่ตั้งผ่านตัวแปร (ถ้าเป็นที่อื่น) — โชว์ครบทุกที่
+function Get-Roots([string]$var, [string]$def) {
+  $d = Join-Path $HOME $def
+  $r = @($d)
+  $v = Get-EnvValue $var
+  if ($v -and ($v -ine $d)) { $r += $v }
+  return $r
+}
+
+# root ของไฟล์ codex (ตัดตั้งแต่ \sessions\ หรือ \archived_sessions\)
+function Get-CodexRoot([string]$p) {
+  if ($p -match '^(.*?)\\(archived_)?sessions\\') { return $matches[1] }
+  return (Join-Path $HOME '.codex')
+}
+
 function Get-CodexLabel([string]$sPath) {
   $fname = [System.IO.Path]::GetFileNameWithoutExtension($sPath)
   if ($fname -match '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})') {
     $id = $matches[1]
-    $idx = Join-Path $HOME '.codex\session_index.jsonl'
+    $idx = Join-Path (Get-CodexRoot $sPath) 'session_index.jsonl'
     $m = Select-String -LiteralPath $idx -Pattern ('"' + $id + '"') -SimpleMatch -ErrorAction SilentlyContinue | Select-Object -Last 1
     if ($m) {
       try {
@@ -189,13 +204,15 @@ function Get-TailTitle([string]$p, [long]$from) {
 }
 
 function Get-SessionRows([bool]$includeAll) {
-  $base = Join-Path $HOME '.claude\projects'
   $claudeFiles = @()
-  if (Test-Path $base) {
-    $claudeFiles = @(Get-ChildItem -Path (Join-Path $base '*\*.jsonl') -File -ErrorAction SilentlyContinue)
+  foreach ($r in (Get-Roots 'CLAUDE_CONFIG_DIR' '.claude')) {
+    $base = Join-Path $r 'projects'
+    if (Test-Path -LiteralPath $base) {
+      $claudeFiles += @(Get-ChildItem -Path (Join-Path $base '*\*.jsonl') -File -ErrorAction SilentlyContinue)
+    }
   }
 
-  $codexDirs = @((Join-Path $HOME '.codex\sessions'), (Join-Path $HOME '.codex\archived_sessions')) | Where-Object { Test-Path $_ }
+  $codexDirs = @(foreach ($r in (Get-Roots 'CODEX_HOME' '.codex')) { (Join-Path $r 'sessions'); (Join-Path $r 'archived_sessions') }) | Where-Object { Test-Path -LiteralPath $_ }
   $codexFiles = @()
   if ($codexDirs) {
     $codexFiles = @(Get-ChildItem -Path $codexDirs -Filter *.jsonl -File -Recurse -ErrorAction SilentlyContinue)
@@ -243,8 +260,11 @@ function Get-SessionRows([bool]$includeAll) {
     }
   }
   # codex rename เขียนแค่ session_index.jsonl ไม่แตะไฟล์ session — ผูก key กับ mtime ของ index ด้วย
-  $codexIdx = Join-Path $HOME '.codex\session_index.jsonl'
-  $codexIdxEp = if (Test-Path $codexIdx) { (Get-Item $codexIdx).LastWriteTime.Ticks } else { 0 }
+  $codexIdxEp = ''
+  foreach ($r in (Get-Roots 'CODEX_HOME' '.codex')) {
+    $codexIdx = Join-Path $r 'session_index.jsonl'
+    if (Test-Path -LiteralPath $codexIdx) { $codexIdxEp += "$((Get-Item -LiteralPath $codexIdx).LastWriteTime.Ticks)" }
+  }
   $newLines = New-Object System.Text.StringBuilder
 
   $rows = @()
@@ -831,7 +851,7 @@ if (-not $fzf) {
   exit 1
 }
 
-$ver = 26
+$ver = 27
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่แบบ background ไม่บล็อกการใช้งาน — ผลไปโผล่ครั้งถัดไป
 Start-Process -WindowStyle Hidden powershell -ArgumentList '-NoProfile', '-Command', "try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 ('https://github.com/cznpsk/ccrm/releases/latest/download/VERSION?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds())).Content.Trim() | Set-Content -LiteralPath '$verCache' } catch {}" -ErrorAction SilentlyContinue
@@ -886,6 +906,9 @@ switch ($tag) {
       Write-Host 'หา session id ไม่เจอ'
       exit 1
     }
+    # เปิดด้วยที่เก็บที่ session นั้นอยู่ (ที่ปกติหรือที่ตั้งผ่าน CODEX_HOME)
+    $root = Get-CodexRoot $spath
+    if ($root -ieq (Join-Path $HOME '.codex')) { Remove-Item Env:CODEX_HOME -ErrorAction SilentlyContinue } else { $env:CODEX_HOME = $root }
     & codex resume $id --yolo
   }
   'kimi' {
@@ -909,6 +932,13 @@ switch ($tag) {
   }
   default {
     $id = [System.IO.Path]::GetFileNameWithoutExtension($spath)
+    $root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $spath))
+    $def = Join-Path $HOME '.claude'
+    if ($root -ine $def) { $env:CLAUDE_CONFIG_DIR = $root }
+    elseif ($env:CLAUDE_CONFIG_DIR -and ($env:CLAUDE_CONFIG_DIR.TrimEnd('\') -ine $def)) {
+      # session อยู่ที่ปกติ แต่ตัวแปรชี้ที่อื่น — มีวอลต์ .claude.json อยู่ใน ~\.claude ไม่มีก็ใช้ค่าเริ่มต้นของ Claude
+      if (Test-VaultConfigured) { $env:CLAUDE_CONFIG_DIR = $def } else { Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
+    }
     & claude --resume $id --dangerously-skip-permissions
   }
 }
