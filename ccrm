@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=27
+ver=28
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -170,8 +170,12 @@ _vault_links() {
 }
 
 _vault_seal() {
-  if ! vault_mounted && [[ -d "$vault_mp" ]] && [[ -z "$(ls -A "$vault_mp" 2>/dev/null)" ]]; then
-    chmod 000 "$vault_mp"
+  if ! vault_mounted && [[ -d "$vault_mp" ]]; then
+    if [[ -z "$(ls -A "$vault_mp" 2>/dev/null)" ]]; then
+      chmod 000 "$vault_mp"
+    else
+      echo "  ! มีไฟล์ใน ~/.claude ตอนล็อก (มีโปรแกรมเขียนเข้ามา): $(ls -A "$vault_mp" | head -5 | tr '\n' ' ')"
+    fi
   fi
   rm -f "$HOME/.claude.json.backup"
   rm -rf "$claude_tmp" 2>/dev/null
@@ -188,10 +192,25 @@ _vault_unlock() {
   fi
   mkdir -p "$vault_mp"; chmod 700 "$vault_mp"
   if [[ -n "$(ls -A "$vault_mp" 2>/dev/null)" ]]; then
-    # มีอะไรเขียนลง mountpoint ตอนล็อก — mount ทับจะซ่อนมันไว้ ให้ผู้ใช้ตัดสินเอง
-    chmod 000 "$vault_mp" 2>/dev/null
-    echo "⚠ ~/.claude ไม่ว่าง (มีไฟล์ถูกสร้างตอนล็อกอยู่) — ย้ายออกก่อนแล้วปลดล็อกใหม่"
-    return 1
+    # มีอะไรเขียนลง mountpoint ตอนล็อก — mount ทับจะซ่อนมันไว้ เสนอย้ายออกไปไว้ข้างๆ (ไม่ลบ) แล้วปลดล็อกต่อ
+    local stray="$HOME/.ccrm-stray-$(date +%Y%m%d-%H%M%S)" yn
+    echo "⚠ มีไฟล์ถูกเขียนลง ~/.claude ตอนล็อกอยู่ (ถ้าปลดล็อกทับ ไฟล์พวกนี้จะถูกซ่อน):"
+    ls -lA "$vault_mp" | sed 1d | head -15
+    printf 'ย้ายไปไว้ที่ ~/%s แล้วปลดล็อกต่อไหม? พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ไม่ปลดล็อก): ' "${stray##*/}"
+    read -r yn < /dev/tty
+    if [[ ! "$yn" =~ ^[Yy] ]]; then
+      chmod 000 "$vault_mp" 2>/dev/null
+      echo "ยังไม่ปลดล็อก"
+      return 1
+    fi
+    mkdir -m 700 "$stray" || return 1
+    find "$vault_mp" -mindepth 1 -maxdepth 1 -exec mv {} "$stray/" \;
+    if [[ -n "$(ls -A "$vault_mp" 2>/dev/null)" ]]; then
+      chmod 000 "$vault_mp" 2>/dev/null
+      echo "ย้ายไม่หมด — ยังไม่ปลดล็อก"
+      return 1
+    fi
+    echo "  ✓ ย้ายไว้ที่ ~/${stray##*/} แล้ว (ดูว่าเป็นของอะไร แล้วลบทิ้งได้)"
   fi
   if ! _vault_attach "$vault_mp"; then
     chmod 000 "$vault_mp"
