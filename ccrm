@@ -172,6 +172,21 @@ _vault_links() {
   done
 }
 
+# ล้างประวัติคำสั่งที่พิมพ์ (shell + REPL) ทุกครั้งที่ล็อก — ผู้ใช้ไม่ต้องการให้มีประวัติเหลือ
+# ~/.zsh_sessions = Terminal.app เก็บแยกต่อหน้าต่าง; ปิดไว้ด้วย SHELL_SESSION_HISTORY=0 ไม่ให้เขียนคืนตอนปิดหน้าต่าง
+# shell ที่เปิดค้างยังมีประวัติในหน่วยความจำ — ล้างจากข้างนอกไม่ได้
+_clear_history() {
+  local f
+  for f in .zsh_history .bash_history .python_history .node_repl_history .mysql_history .mariadb_history .psql_history .sqlite_history .lesshst; do
+    [[ -f "$HOME/$f" ]] && : > "$HOME/$f"
+  done
+  rm -f "$HOME"/.zsh_sessions/* 2>/dev/null
+  if ! grep -q 'SHELL_SESSION_HISTORY=0' "$HOME/.zshenv" 2>/dev/null; then
+    printf '\n# ccrm: ไม่ให้ Terminal.app เก็บประวัติคำสั่งแยกต่อหน้าต่าง (~/.zsh_sessions)\nexport SHELL_SESSION_HISTORY=0\n' >> "$HOME/.zshenv"
+  fi
+  return 0
+}
+
 _vault_seal() {
   if ! vault_mounted && [[ -d "$vault_mp" ]]; then
     if [[ -z "$(ls -A "$vault_mp" 2>/dev/null)" ]]; then
@@ -227,6 +242,7 @@ _vault_unlock() {
 # auto=1 มาจาก sleep hook — ปิด AI CLI ให้เอง แต่ไม่ฆ่าอย่างอื่น ไม่ใช้ -force (กันอิมเมจพัง)
 _vault_lock() {
   local auto="${1:-}" busy p left yn
+  _clear_history
   _is_mac || { echo "ล็อก/ปลดล็อกยังรองรับแค่ macOS"; return 1; }
   vault_configured || { echo "ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup"; return 1; }
   cd / || true
@@ -352,6 +368,8 @@ _lid_watch() {
   while sleep 3; do
     # พับจอ หรือ ล็อกหน้าจอ — กฎเดียวกัน (AI ยังรัน = รอ)
     if ! _lid_closed && ! _screen_locked; then tries=0; next=0; continue; fi
+    # ล้างประวัติทันทีที่พับจอ/ล็อกหน้าจอ แม้วอลต์ยังรอ AI อยู่
+    (( tries == 0 && next == 0 )) && { _clear_history; next=1; }
     vault_mounted || continue
     [[ -n "$(_ai_running)" ]] && continue
     now=$(date +%s)
