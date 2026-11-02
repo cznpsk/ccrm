@@ -722,6 +722,22 @@ function Move-ExtDirs([string]$letter) {
   }
 }
 
+# ล้างประวัติคำสั่งที่พิมพ์ (PowerShell/Git Bash/REPL) ทุกครั้งที่ล็อก — ผู้ใช้ไม่ต้องการให้มีประวัติเหลือ
+# เขียนว่างแทนลบ (PSReadLine ถือไฟล์อยู่) · หน้าต่างที่เปิดค้างยังมีประวัติในหน่วยความจำ ล้างจากข้างนอกไม่ได้
+function Clear-TypedHistory {
+  $files = @()
+  if ($env:APPDATA) {
+    $psrl = Join-Path $env:APPDATA 'Microsoft\Windows\PowerShell\PSReadLine'
+    $files += @(Get-ChildItem -LiteralPath $psrl -Filter '*_history.txt' -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+  }
+  foreach ($n in '.bash_history', '.python_history', '.node_repl_history', '.mysql_history', '.mariadb_history', '.psql_history', '.sqlite_history', '.lesshst') {
+    $files += (Join-Path $HOME $n)
+  }
+  foreach ($f in $files) {
+    if (Test-Path -LiteralPath $f -PathType Leaf) { try { [System.IO.File]::WriteAllText([string]$f, '') } catch {} }
+  }
+}
+
 function Clear-ClaudeTemp {
   Remove-Item -LiteralPath (Join-Path $HOME '.claude.json.backup') -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath (Join-Path $env:TEMP 'claude') -Recurse -Force -ErrorAction SilentlyContinue
@@ -750,6 +766,7 @@ function Invoke-VaultUnlock {
 
 # auto = มาจาก task ตอนเครื่อง sleep — ปิด AI CLI ให้เอง ไม่ใช้ /force (กันคอนเทนเนอร์พัง)
 function Invoke-VaultLock([bool]$auto) {
+  Clear-TypedHistory
   if (-not (Test-VaultConfigured)) { Write-Host 'ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup'; return $false }
   Set-Location -LiteralPath $env:SystemRoot
   $letter = Get-VaultLetter
