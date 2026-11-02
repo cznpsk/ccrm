@@ -270,6 +270,11 @@ _vault_lock() {
         hdiutil detach "$vault_mp" -quiet 2>/dev/null && break
       done
     fi
+    # สั่งล็อกเอง — โชว์ว่าใครถือไฟล์อะไร แล้วถามปิดให้ (sleep/พับจอ/ล็อกหน้าจอ ไม่ปิดโปรแกรมที่ไม่ใช่ AI ให้เอง)
+    if vault_mounted && [[ -z "$auto" ]]; then
+      busy=$(_vault_busy)
+      [[ -n "$busy" ]] && _offer_close_holders "$busy" && hdiutil detach "$vault_mp" -quiet 2>/dev/null
+    fi
     if vault_mounted; then
       busy=$(_vault_busy)
       _notify "ยังล็อกไม่ได้ — มีโปรแกรมเปิดไฟล์ในวอลต์อยู่: $(_proc_list "$busy" | awk '{print $2}' | xargs -n1 basename 2>/dev/null | sort -u | tr '\n' ' ')"
@@ -279,6 +284,33 @@ _vault_lock() {
   fi
   _vault_seal
   echo "🔒 ล็อกแล้ว"
+}
+
+# $1 = pid ที่ถือไฟล์ในวอลต์ — terminal/shell/Finder ไม่ปิดให้ (ปิดแล้วหน้าต่างหาย) บอกให้ cd ออกเอง
+_offer_close_holders() {
+  local p c f kill_list="" keep="" yn left i
+  echo "ยังล็อกไม่ได้ — มีโปรแกรมเปิดไฟล์ในวอลต์อยู่:"
+  for p in $1; do
+    c=$(basename "$(ps -o comm= -p "$p" 2>/dev/null)")
+    [[ -n "$c" ]] || continue
+    f=$(lsof -p "$p" -Fn 2>/dev/null | grep "^n$vault_mp" | head -1 | cut -c2-)
+    case "$c" in
+      zsh|-zsh|bash|-bash|sh|fish|login|tmux|screen|Terminal|iTerm2|Finder) keep="$keep $p"; printf '  %6s %-14s %s  ← terminal/หน้าต่าง: cd ออกหรือปิดเอง\n' "$p" "$c" "${f/#$HOME/~}" ;;
+      *) kill_list="$kill_list $p"; printf '  %6s %-14s %s\n' "$p" "$c" "${f/#$HOME/~}" ;;
+    esac
+  done
+  [[ -n "$kill_list" ]] || return 1
+  printf 'ให้ปิดโปรแกรมพวกนี้แล้วล็อกเลยไหม? (ssh = ตัดการเชื่อมต่อนั้น) พิมพ์ y แล้วกด Enter (กด Enter เฉยๆ = ไม่ล็อก): '
+  read -r yn < /dev/tty
+  [[ "$yn" =~ ^[Yy] ]] || { echo "ยกเลิก — ยังไม่ล็อก"; return 1; }
+  kill -TERM $kill_list 2>/dev/null
+  for i in 1 2 3 4 5 6; do
+    left=""; for p in $kill_list; do kill -0 "$p" 2>/dev/null && left="$left $p"; done
+    [[ -z "$left" ]] && break
+    sleep 0.5
+  done
+  [[ -n "$left" ]] && echo "  ! ปิดไม่ลง:$left"
+  [[ -z "$keep" ]]
 }
 
 _install_wrappers() {
