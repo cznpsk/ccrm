@@ -273,10 +273,22 @@ _vault_lock() {
     # สั่งล็อกเอง — โชว์ว่าใครถือไฟล์อะไร แล้วถามปิดให้ (sleep/พับจอ/ล็อกหน้าจอ ไม่ปิดโปรแกรมที่ไม่ใช่ AI ให้เอง)
     if vault_mounted && [[ -z "$auto" ]]; then
       busy=$(_vault_busy)
-      [[ -n "$busy" ]] && _offer_close_holders "$busy" && hdiutil detach "$vault_mp" -quiet 2>/dev/null
+      if [[ -n "$busy" ]] && _offer_close_holders "$busy"; then
+        # เพิ่งปิด — macOS ยังปล่อยไฟล์ไม่ทัน ลองถอดซ้ำสักพัก
+        local j
+        for j in 1 2 3 4 5 6 7 8 9 10; do
+          hdiutil detach "$vault_mp" -quiet 2>/dev/null && break
+          sleep 0.5
+        done
+      fi
     fi
     if vault_mounted; then
       busy=$(_vault_busy)
+      if [[ -z "$busy" ]]; then
+        # ไม่เห็นใครถือ = ของระบบ (Spotlight/fseventsd เป็นของ root มองไม่เห็น) หรือเพิ่งปล่อยไม่ทัน
+        _notify "ยังล็อกไม่ได้ — macOS ยังใช้วอลต์อยู่ (เช่น Spotlight) ลองสั่งล็อกอีกครั้งในไม่กี่วินาที"
+        return 1
+      fi
       _notify "ยังล็อกไม่ได้ — มีโปรแกรมเปิดไฟล์ในวอลต์อยู่: $(_proc_list "$busy" | awk '{print $2}' | xargs -n1 basename 2>/dev/null | sort -u | tr '\n' ' ')"
       [[ -z "$auto" ]] && echo "(terminal ที่ cd อยู่ใน ~/.claude ก็นับ — cd ออกหรือปิดก่อน)"
       return 1
