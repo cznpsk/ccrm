@@ -1470,7 +1470,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 42
+$ver = 43
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
