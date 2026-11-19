@@ -9,7 +9,7 @@
 #   ไม่มี resume-by-id ตรงๆ เลยใช้ --session-file แทน (ต้อง cd เข้า project เดิมก่อนเสมอ)
 set -uo pipefail
 
-ver=44
+ver=45
 raw="https://github.com/cznpsk/ccrm/releases/latest/download"
 
 if [[ "${1:-}" == "update" ]]; then
@@ -187,6 +187,15 @@ _clear_history() {
   return 0
 }
 
+# ลิงก์โฟลเดอร์โปรเจกต์ที่ย้ายเข้าวอลต์ (Ctrl-E) — ปลดล็อก = แสดงใน Finder, ล็อก = ซ่อน (เปิดไม่ได้อยู่แล้ว)
+# chflags -h = ตั้งที่ตัวลิงก์ ไม่แตะปลายทาง · รายชื่ออยู่ในวอลต์ ต้องอ่านก่อนถอด
+_proj_links() { cut -f1 "$vault_mp/.ccrm/projects.tsv" 2>/dev/null; }
+_proj_flag() {   # $1 = hidden|nohidden  $2 = รายชื่อ path
+  local l
+  while IFS= read -r l; do [[ -n "$l" && -L "$l" ]] && chflags -h "$1" "$l" 2>/dev/null; done <<< "$2"
+  return 0
+}
+
 _vault_seal() {
   if ! vault_mounted && [[ -d "$vault_mp" ]]; then
     if [[ -z "$(ls -A "$vault_mp" 2>/dev/null)" ]]; then
@@ -205,6 +214,7 @@ _vault_unlock() {
   vault_configured || { echo "ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup"; return 1; }
   if vault_mounted; then
     _vault_links
+    _proj_flag nohidden "$(_proj_links)"
     echo "🔓 ปลดล็อกอยู่แล้ว"
     return 0
   fi
@@ -236,6 +246,7 @@ _vault_unlock() {
     return 1
   fi
   _vault_links
+  _proj_flag nohidden "$(_proj_links)"
   echo "🔓 ปลดล็อกแล้ว"
 }
 
@@ -272,6 +283,7 @@ _vault_lock() {
       done
     fi
   fi
+  local plinks; plinks=$(_proj_links)
   if ! hdiutil detach "$vault_mp" -quiet 2>/dev/null; then
     sleep 1
     if ! hdiutil detach "$vault_mp" -quiet 2>/dev/null; then
@@ -311,6 +323,7 @@ _vault_lock() {
     fi
   fi
   _vault_seal
+  _proj_flag hidden "$plinks"
   echo "🔒 ล็อกแล้ว"
 }
 

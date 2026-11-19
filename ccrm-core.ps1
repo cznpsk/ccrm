@@ -668,6 +668,7 @@ function Sync-VaultLinks([string]$letter, [bool]$adopt) {
     }
   }
   Protect-VaultDirs $letter
+  Set-ProjLinksHidden $false (Get-ProjLinks)
 }
 
 # Process ก่อน — CLI ได้ค่าจาก terminal ที่เปิดมัน ($PROFILE ทับ User ได้)
@@ -765,6 +766,19 @@ function Invoke-VaultUnlock {
 }
 
 # auto = มาจาก task ตอนเครื่อง sleep — ปิด AI CLI ให้เอง ไม่ใช้ /force (กันคอนเทนเนอร์พัง)
+# junction โฟลเดอร์โปรเจกต์ที่ย้ายเข้าวอลต์ (Ctrl-E) — ปลดล็อก = แสดงใน Explorer, ล็อก = ซ่อน (เปิดไม่ได้อยู่แล้ว)
+# attrib /L = ตั้งที่ตัว junction ไม่แตะปลายทาง · รายชื่ออยู่ในวอลต์ ต้องอ่านก่อน dismount
+function Get-ProjLinks {
+  return @(Read-FileLines (Get-ProjListFile) | ForEach-Object { ($_ -split "`t")[0] } | Where-Object { $_ })
+}
+function Set-ProjLinksHidden([bool]$hide, [string[]]$paths) {
+  $flag = if ($hide) { '+' } else { '-' }
+  foreach ($p in $paths) {
+    $it = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+    if ($it -and $it.LinkType -eq 'Junction') { & attrib ($flag + 'h') ($flag + 's') /L $p 2>$null | Out-Null }
+  }
+}
+
 function Invoke-VaultLock([bool]$auto) {
   Clear-TypedHistory
   if (-not (Test-VaultConfigured)) { Write-Host 'ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup'; return $false }
@@ -783,6 +797,7 @@ function Invoke-VaultLock([bool]$auto) {
     $ai | Stop-Process -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
   }
+  $plinks = Get-ProjLinks
   if (-not (Invoke-VcDismount $letter)) {
     Start-Sleep -Seconds 1
     if (-not (Invoke-VcDismount $letter)) {
@@ -791,6 +806,7 @@ function Invoke-VaultLock([bool]$auto) {
     }
   }
   Clear-ClaudeTemp
+  Set-ProjLinksHidden $true $plinks
   Write-Host '🔒 ล็อกแล้ว'
   return $true
 }
@@ -1470,7 +1486,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 44
+$ver = 45
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
