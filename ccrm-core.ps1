@@ -1535,7 +1535,7 @@ $scriptPath = $PSCommandPath
 $psBase = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' + $scriptPath + '"'
 # หัว 2 บรรทัด — บรรทัดเดียวยาวเกินช่องรายการ Ctrl-L ตกขอบมองไม่เห็น
 $h2 = if ($lockNote) { 'Enter=resume  Ctrl-E=ย้ายโปรเจกต์เข้า/ออกวอลต์ 📁  Tab=ลบ (กด 2 ครั้ง)  Ctrl-A=รีเฟรช  Esc=ยกเลิก' } else { 'Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก' }
-$header = "รวม $($rows.Count) sessions  |  ccrm v$ver$lockNote$updateNote`n$h2"
+$header = "รวม $($rows.Count) sessions  |  ccrm v$ver$lockNote  |  Ctrl-N=Claude ใหม่  Ctrl-X=Codex ใหม่$updateNote`n$h2"
 # 📂 โฟลเดอร์ของแถวที่เลือก — โชว์ที่ prompt (Mac โชว์เป็นบรรทัดที่ 3 ของหัว)
 # fzf บน Windows รัน transform ผ่าน cmd ธรรมดา: echo ทิ้ง CR (␍) ท้ายบรรทัด และไม่มี !VAR! ให้ใช้ — set /p พิมพ์โดยไม่ขึ้นบรรทัด
 # PS 5.1 ไม่ escape " ใน argument ที่ส่งให้ native — ต้องเขียน \" เอง
@@ -1553,7 +1553,9 @@ $lockBind = if ($lockNote) {
   @('--bind', ('ctrl-l:execute(' + $psBase + ' lock >CON)+abort'),
     '--bind', ('ctrl-e:execute(' + $psBase + ' -ProjectMove -Target {1} -Sel {2} <CON >CON)+reload(' + $psBase + ' -ListOnly' + $allFlag + ')'))
 } else { @() }
-$picked = $rows | fzf --multi --delimiter "`t" --with-nth 2..5 @hdrBinds --header $header --preview $previewCmd --preview-window hidden --tabstop 1 --bind $tabBind --bind $refreshBind @lockBind
+# Ctrl-N / Ctrl-X — เริ่มแชทใหม่ (print() ขึ้นบรรทัดแรกของผลลัพธ์ ไม่ต้องผ่าน cmd)
+$newBinds = @('--bind', 'ctrl-n:print(@new-claude)+accept', '--bind', 'ctrl-x:print(@new-codex)+accept')
+$picked = $rows | fzf --multi --delimiter "`t" --with-nth 2..5 @hdrBinds --header $header --preview $previewCmd --preview-window hidden --tabstop 1 --bind $tabBind --bind $refreshBind @lockBind @newBinds
 
 if (-not $picked) {
   # Ctrl-L ล็อกแล้ว fzf ล้างจอทิ้ง — บอกผลอีกที
@@ -1561,7 +1563,11 @@ if (-not $picked) {
   exit 0
 }
 
-$picked = Repair-FzfOut ([string]@($picked)[0])
+$first = Repair-FzfOut ([string]@($picked)[0])
+# เริ่มแชทใหม่ในโฟลเดอร์ที่สั่ง ccrm
+if ($first -eq '@new-claude') { & claude --dangerously-skip-permissions; exit 0 }
+if ($first -eq '@new-codex') { & codex --yolo; exit 0 }
+$picked = $first
 $fields = $picked -split "`t"
 $spath = $fields[0]
 $tag = ($fields[1] -replace '[^a-z]', '')

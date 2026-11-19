@@ -1231,7 +1231,7 @@ fi
 reload_cmd="$0 --list ${1:-}"
 # หัว 2 บรรทัด — บรรทัดเดียวยาวเกินช่องรายการ (พรีวิวกินครึ่งจอ) Ctrl-L ตกขอบมองไม่เห็น
 # ส่งผ่าน env ให้ transform-header (sh -c) ไม่ต้องหนีอักขระ
-export CCRM_H1="ccrm v$ver$lock_note$update_note"
+export CCRM_H1="ccrm v$ver$lock_note  |  Ctrl-N=Claude ใหม่  Ctrl-X=Codex ใหม่$update_note"
 export CCRM_H2="Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก"
 [[ -n "$lock_note" ]] && CCRM_H2="Enter=resume  Ctrl-E=ย้ายโปรเจกต์เข้า/ออกวอลต์ 📁  Tab=ลบ (กด 2 ครั้ง)  Ctrl-A=รีเฟรช  Esc=ยกเลิก"
 
@@ -1248,6 +1248,7 @@ picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t'
   esac | grep -v "^<" | head -30' \
   --preview-window=hidden --tabstop=1 \
   --bind "ctrl-a:reload($reload_cmd)" \
+  --bind 'ctrl-n:print(@new-claude)+accept' --bind 'ctrl-x:print(@new-codex)+accept' \
   ${lock_bind[@]+"${lock_bind[@]}"} \
   --bind "tab:transform:if [ \"\$FZF_SELECT_COUNT\" -gt 0 ] && [ {+1} = {1} ]; then echo \"execute-silent(rm -rf {1})+reload($reload_cmd)+clear-selection\"; else echo 'clear-selection+toggle'; fi") || {
   # Ctrl-L ล็อกแล้ว fzf ล้างจอทิ้ง — บอกผลอีกที
@@ -1256,6 +1257,12 @@ picked=$({ _list "${1:-}" 2>/dev/null || true; } | fzf --multi --delimiter=$'\t'
 }
 
 [[ -n "$picked" ]] || exit 0
+
+# Ctrl-N / Ctrl-X — เริ่มแชทใหม่ในโฟลเดอร์ที่สั่ง ccrm (print() ขึ้นบรรทัดแรกของผลลัพธ์)
+case "$(head -1 <<< "$picked")" in
+  @new-claude) exec claude --dangerously-skip-permissions ;;
+  @new-codex)  exec codex --yolo ;;
+esac
 
 spath=$(echo "$picked" | cut -f1)
 tag=$(echo "$picked" | cut -f2 | LC_ALL=C tr -dc 'a-z')
