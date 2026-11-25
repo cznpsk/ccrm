@@ -171,7 +171,7 @@ function Get-RealDir([string]$d, [hashtable]$memo, [int]$depth = 0) {
   $d = $d.TrimEnd('\', '/')
   if (-not $d) { return $d }
   if ($memo.ContainsKey($d)) { return $memo[$d] }
-  $par = Split-Path $d -Parent
+  $par = try { [System.IO.Path]::GetDirectoryName($d) } catch { $null }   # v49: 'C:' ทำ Split-Path พัง
   if (-not $par -or $depth -gt 40) { $memo[$d] = $d; return $d }
   $r = Join-Path (Get-RealDir $par $memo ($depth + 1)) (Split-Path $d -Leaf)
   $memo[$d] = $r
@@ -702,11 +702,20 @@ function Sync-VaultLinks([string]$letter, [bool]$adopt) {
         }
         continue
       }
-      if (Test-Path -LiteralPath $dst) { Write-Host "  ! มีทั้ง ~\$k และในวอลต์ ไม่แตะ — รวมเองแล้วรัน ccrm lock-setup ใหม่"; continue }
+      if (Test-Path -LiteralPath $dst) {
+        # v49: มีทั้งข้างนอกและในวอลต์ (AI สร้าง ~\$k ใหม่ตอน junction หาย) — รวมเข้าวอลต์: ไฟล์ใหม่/ใหม่กว่าจากข้างนอกชนะ ไม่ลบอะไรในวอลต์
+        & robocopy $src $dst /E /XO /COPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -ge 8) { Write-Host "  ✗ รวม ~\$k เข้าวอลต์ไม่สำเร็จ ไม่แตะของเดิม"; continue }
+        $miss = @(Get-ChildItem -LiteralPath $src -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { -not (Test-Path -LiteralPath ($dst + $_.FullName.Substring($src.Length))) })
+        if ($miss.Count -gt 0) { Write-Host "  ✗ รวม ~\$k ไม่ครบ (ขาด $($miss.Count) ไฟล์) ไม่แตะของเดิม"; continue }
+        $s1 = Get-TreeSig $src
+        Write-Host "  ✓ รวม ~\$k เข้าของเดิมในวอลต์แล้ว"
+      } else {
       & robocopy $src $dst /E /COPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
       if ($LASTEXITCODE -ge 8) { Write-Host "  ✗ copy ~\$k ไม่สำเร็จ ไม่แตะของเดิม"; continue }
       $s1 = Get-TreeSig $src; $s2 = Get-TreeSig $dst
       if ($s1 -ne $s2) { Write-Host "  ✗ ~\$k copy ไม่ครบ ($s1 ≠ $s2) ไม่แตะของเดิม"; Remove-Item -LiteralPath $dst -Recurse -Force; continue }
+      }
       New-Item -ItemType Directory -Force -Path $plainBackup | Out-Null
       Move-Item -LiteralPath $src -Destination (Join-Path $plainBackup ($k + '.' + (Get-Date -Format 'yyyyMMdd-HHmmss')))
       Write-Host "  ✓ ย้าย ~\$k เข้าวอลต์แล้ว ($($s1.Split(' ')[0]) ไฟล์)"
@@ -1579,7 +1588,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 48
+$ver = 49
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
