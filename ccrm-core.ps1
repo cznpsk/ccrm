@@ -54,8 +54,9 @@ function Enable-ConsoleVt {
     if ($h -eq [IntPtr]::Zero -or $h -eq [IntPtr](-1)) { return }
     $m = [uint32]0
     if (-not [CcrmCon.K]::GetConsoleMode($h, [ref]$m)) { return }
-    $script:ConH = $h; $script:ConOld = $m
-    if ([CcrmCon.K]::SetConsoleMode($h, ($m -bor 5))) {
+    $script:ConH = $h; if ($null -eq $script:ConOld) { $script:ConOld = $m }
+    # 0x1 processed + 0x2 wrap + 0x4 VT — ต้องทำแม้ใน Windows Terminal: fzf ปิด processed ไว้ conhost (ใต้ WT) เลยส่ง ←◙♪ ต่อไปดิบ
+    if ([CcrmCon.K]::SetConsoleMode($h, ($m -bor 7))) {
       $c = [uint32]0; [void][CcrmCon.K]::GetConsoleMode($h, [ref]$c)
       $script:VtOn = (($c -band 4) -ne 0)
     } else { [void][CcrmCon.K]::SetConsoleMode($h, ($m -bor 1)) }
@@ -63,9 +64,8 @@ function Enable-ConsoleVt {
 }
 function Restore-ConsoleMode { try { if ($null -ne $script:ConOld) { [void][CcrmCon.K]::SetConsoleMode($script:ConH, $script:ConOld) } } catch {} }
 # list/preview/tab ถูก fzf เรียกถี่ และ output ไปเข้า fzf ไม่ใช่จอ — ไม่ต้องเสียเวลา Add-Type
-# Windows Terminal เปิด VT ให้อยู่แล้ว ไม่ต้องเสีย ~0.5 วิ compile
-if ($env:WT_SESSION) { $script:VtOn = $true }
-elseif (-not ($ListOnly -or $PreviewLine -or $TabTransform -or $DeletePath)) { Enable-ConsoleVt }
+# v47: ห้ามข้ามใน Windows Terminal (v46 ข้ามแล้วยังขึ้น ←[36m ◙ เพราะ fzf ปิด processed output ของ conhost ใต้ WT)
+if (-not ($ListOnly -or $PreviewLine -or $TabTransform -or $DeletePath)) { Enable-ConsoleVt }
 
 # อีโมจิ: Windows Terminal / VS Code วาดได้ · conhost วาดไม่ได้ (เป็นกล่อง/หาย) — ใช้สัญลักษณ์ BMP กว้าง 1 ช่อง + เว้นวรรค
 # บังคับได้ด้วย CCRM_EMOJI=1 / 0
@@ -1533,7 +1533,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 46
+$ver = 47
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
@@ -1553,6 +1553,7 @@ if ([int]::TryParse($latest, [ref]$ln) -and $ln -gt $ver) { $updateNote = "  |  
 # มีเวอร์ชันใหม่ — ถามก่อนใช้งาน (ก่อนถามรหัสปลดล็อกด้วย) ลูกศรขึ้นลง + Enter, Esc = ข้าม
 if ($updateNote -and (Get-Command fzf -ErrorAction SilentlyContinue)) {
   $choice = Repair-FzfOut (@("update`tอัพเดทเป็น v$latest เลย", "skip`tข้ามไปก่อน (ใช้ v$ver ต่อ)") | fzf --delimiter "`t" --with-nth 2.. --header "⬆ มีเวอร์ชันใหม่ของ ccrm" --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> ')
+Enable-ConsoleVt
   if ($choice -like 'update*') {
     $u = 'https://github.com/cznpsk/ccrm/releases/latest/download/install.ps1?ts=' + [DateTimeOffset]::Now.ToUnixTimeSeconds()
     Invoke-Expression (Get-WebText $u)
@@ -1578,6 +1579,7 @@ if (Test-VaultConfigured) {
   $lockNote = '  |  ' + $icUnlock.Trim() + ' Ctrl-L=ล็อก'
 } elseif (-not (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'ccrm-lock-nag-off')) -and (Get-Command fzf -ErrorAction SilentlyContinue)) {
   $choice = Repair-FzfOut (@("setup`tตั้งค่าเลย (ccrm lock-setup)", "later`tไว้ทีหลัง", "never`tไม่ต้องถามอีก") | fzf --delimiter "`t" --with-nth 2.. --header ($icLock.Trim() + ' ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep') --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> ')
+Enable-ConsoleVt
   if ($choice -like 'setup*') { Invoke-VaultSetup; exit 0 }
   if ($choice -like 'never*') { [System.IO.File]::WriteAllText((Join-Path $env:LOCALAPPDATA 'ccrm-lock-nag-off'), '1') }
 }
@@ -1620,6 +1622,7 @@ $lockBind = if ($lockNote) {
 # Ctrl-N / Ctrl-X — เริ่มแชทใหม่ (print() ขึ้นบรรทัดแรกของผลลัพธ์ ไม่ต้องผ่าน cmd)
 $newBinds = @('--bind', 'ctrl-n:print(@new-claude)+accept', '--bind', 'ctrl-x:print(@new-codex)+accept')
 $picked = $rows | fzf --multi --delimiter "`t" --with-nth 2..5 @hdrBinds --header $header --preview $previewCmd --preview-window hidden --tabstop 1 --bind $tabBind --bind $refreshBind @lockBind @newBinds
+Enable-ConsoleVt
 
 if (-not $picked) {
   # Ctrl-L ล็อกแล้ว fzf ล้างจอทิ้ง — บอกผลอีกที
