@@ -728,6 +728,8 @@ function Sync-VaultLinks([string]$letter, [bool]$adopt) {
           Write-Host "    ลบของไม่ใช้ใน ~\$k (เช่น sessions เก่า) หรือขยายวอลต์ด้วย VeraCrypt แล้วรัน ccrm lock-setup ใหม่"
           Restore-CodexSandbox $src $sbMoved; continue
         }
+        # v52: daemon release ของ codex ห้ามผสมเก่า/ใหม่ ("existing daemon release has different contents") — ลบในวอลต์ให้ codex แตกใหม่
+        if ($k -eq '.codex') { Remove-Item -LiteralPath (Join-Path $dst 'packages\app-server-daemon') -Recurse -Force -ErrorAction SilentlyContinue }
         $rlog = Join-Path $env:TEMP 'ccrm-robocopy.log'
         & robocopy $src $dst /E /XO /COPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP /UNILOG:$rlog | Out-Null
         $rc = $LASTEXITCODE
@@ -1624,7 +1626,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 51
+$ver = 52
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
