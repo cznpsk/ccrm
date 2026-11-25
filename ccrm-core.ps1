@@ -33,6 +33,45 @@ function Repair-FzfOut([string]$s) {
   return $s
 }
 try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+
+# conhost (หน้าต่าง PowerShell ธรรมดา ไม่ใช่ Windows Terminal): ESC[ ขึ้นดิบ (←[36m) และโปรแกรมที่ fzf execute
+# ได้โหมดจอที่ fzf ปิด processed output ไว้ → \n ขึ้นเป็น ◙ — เปิด VT(0x4)+processed(0x1) บน CONOUT$ เอง
+# เปิดไม่ได้ (conhost เก่า/legacy console) = ไม่ใช้สี ไม่ใช้ alt screen (ใช้ cls แทน)
+$script:VtOn = $false
+$script:ConH = [IntPtr]::Zero
+$script:ConOld = $null
+function Enable-ConsoleVt {
+  try {
+    if (-not ('CcrmCon.K' -as [type])) {
+      Add-Type -Namespace CcrmCon -Name K -ErrorAction Stop -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetConsoleMode(IntPtr h, out uint m);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetConsoleMode(IntPtr h, uint m);
+[DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint c, uint f, IntPtr t);
+'@
+    }
+    # CONOUT$ = จอจริงเสมอ ทั้งตอน stdout ปกติและตอน >CON ใต้ fzf
+    $h = [CcrmCon.K]::CreateFileW('CONOUT$', [uint32]3221225472, 3, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
+    if ($h -eq [IntPtr]::Zero -or $h -eq [IntPtr](-1)) { return }
+    $m = [uint32]0
+    if (-not [CcrmCon.K]::GetConsoleMode($h, [ref]$m)) { return }
+    $script:ConH = $h; $script:ConOld = $m
+    if ([CcrmCon.K]::SetConsoleMode($h, ($m -bor 5))) {
+      $c = [uint32]0; [void][CcrmCon.K]::GetConsoleMode($h, [ref]$c)
+      $script:VtOn = (($c -band 4) -ne 0)
+    } else { [void][CcrmCon.K]::SetConsoleMode($h, ($m -bor 1)) }
+  } catch {}
+}
+function Restore-ConsoleMode { try { if ($null -ne $script:ConOld) { [void][CcrmCon.K]::SetConsoleMode($script:ConH, $script:ConOld) } } catch {} }
+# list/preview/tab ถูก fzf เรียกถี่ และ output ไปเข้า fzf ไม่ใช่จอ — ไม่ต้องเสียเวลา Add-Type
+# Windows Terminal เปิด VT ให้อยู่แล้ว ไม่ต้องเสีย ~0.5 วิ compile
+if ($env:WT_SESSION) { $script:VtOn = $true }
+elseif (-not ($ListOnly -or $PreviewLine -or $TabTransform -or $DeletePath)) { Enable-ConsoleVt }
+
+# อีโมจิ: Windows Terminal / VS Code วาดได้ · conhost วาดไม่ได้ (เป็นกล่อง/หาย) — ใช้สัญลักษณ์ BMP กว้าง 1 ช่อง + เว้นวรรค
+# บังคับได้ด้วย CCRM_EMOJI=1 / 0
+$UseEmoji = if ($env:CCRM_EMOJI -eq '1') { $true } elseif ($env:CCRM_EMOJI -eq '0') { $false } else { [bool]($env:WT_SESSION -or $env:TERM_PROGRAM -eq 'vscode') }
+if ($UseEmoji) { $icLock = '🔒'; $icUnlock = '🔓'; $icDir = '📁'; $icOpen = '📂' }
+else { $icLock = [string][char]0x25A0 + ' '; $icUnlock = [string][char]0x25A1 + ' '; $icDir = [string][char]0x2666 + ' '; $icOpen = [string][char]0x25BA }
 # progress bar ของ Invoke-WebRequest ใน PS 5.1 ทำให้โหลดไฟล์ใหญ่ช้าเป็นสิบเท่า
 $ProgressPreference = 'SilentlyContinue'
 
@@ -428,14 +467,14 @@ function Get-SessionRows([bool]$includeAll) {
     $ic = ''
     if ($vl) {
       $ic = '  '
-      foreach ($pre in $encRoots) { if ($item.RefPath -like ($pre + '*')) { $ic = '🔒'; break } }
+      foreach ($pre in $encRoots) { if ($item.RefPath -like ($pre + '*')) { $ic = $icLock; break } }
       $pf = '  '
       if ($cw) {
         foreach ($pre in $inVault) {
           if (($cw.TrimEnd('\') + '\') -like ($pre + '*')) {
-            $pf = '📁'
+            $pf = $icDir
             $tgt = $projTarget[$pre.TrimEnd('\')]
-            $cwShow += '   (🔒 อยู่ในวอลต์' + $(if ($tgt) { ': ' + $tgt } else { '' }) + ')'
+            $cwShow += '   (' + $icLock.Trim() + ' อยู่ในวอลต์' + $(if ($tgt) { ': ' + $tgt } else { '' }) + ')'
             break
           }
         }
@@ -748,15 +787,15 @@ function Invoke-VaultUnlock {
   if (-not (Test-VaultConfigured)) { Write-Host 'ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup'; return $false }
   if (-not (Get-VcExe 'VeraCrypt.exe')) { Write-Host 'ไม่พบ VeraCrypt — รัน ccrm lock-setup ใหม่เพื่อติดตั้ง'; return $false }
   $letter = Get-VaultLetter
-  if ($letter) { Sync-VaultLinks $letter $false; Write-Host '🔓 ปลดล็อกอยู่แล้ว'; return $true }
+  if ($letter) { Sync-VaultLinks $letter $false; Write-Host ($icUnlock.Trim() + ' ปลดล็อกอยู่แล้ว'); return $true }
   $letter = Get-FreeLetter
   if (-not $letter) { Write-Host 'ไม่มี drive letter ว่าง'; return $false }
   for ($i = 1; $i -le 3; $i++) {
-    $pw = Read-Pw '🔒 รหัสผ่านวอลต์'
+    $pw = Read-Pw ($icLock.Trim() + ' รหัสผ่านวอลต์')
     if (-not $pw) { return $false }
     if (Invoke-VcMount $letter $pw) {
       Sync-VaultLinks $letter $false
-      Write-Host '🔓 ปลดล็อกแล้ว'
+      Write-Host ($icUnlock.Trim() + ' ปลดล็อกแล้ว')
       return $true
     }
     Write-Host "รหัสไม่ถูก ลองใหม่ ($i/3)"
@@ -784,7 +823,7 @@ function Invoke-VaultLock([bool]$auto) {
   if (-not (Test-VaultConfigured)) { Write-Host 'ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup'; return $false }
   Set-Location -LiteralPath $env:SystemRoot
   $letter = Get-VaultLetter
-  if (-not $letter) { Clear-ClaudeTemp; Write-Host '🔒 ล็อกอยู่แล้ว'; return $true }
+  if (-not $letter) { Clear-ClaudeTemp; Write-Host ($icLock.Trim() + ' ล็อกอยู่แล้ว'); return $true }
   Sync-VaultLinks $letter $false
   $ai = @(Get-AiProcs)
   if ($ai.Count -gt 0) {
@@ -807,7 +846,7 @@ function Invoke-VaultLock([bool]$auto) {
   }
   Clear-ClaudeTemp
   Set-ProjLinksHidden $true $plinks
-  Write-Host '🔒 ล็อกแล้ว'
+  Write-Host ($icLock.Trim() + ' ล็อกแล้ว')
   return $true
 }
 
@@ -870,13 +909,13 @@ function Set-SleepTask([bool]$on) {
 function Show-VaultStatus {
   if (-not (Test-VaultConfigured)) { Write-Host 'ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup'; return }
   $l = Get-VaultLetter
-  if ($l) { Write-Host "🔓 ปลดล็อกอยู่ (ไดรฟ์ ${l}:)" } else { Write-Host '🔒 ล็อกอยู่' }
+  if ($l) { Write-Host ($icUnlock.Trim() + " ปลดล็อกอยู่ (ไดรฟ์ ${l}:)") } else { Write-Host ($icLock.Trim() + ' ล็อกอยู่') }
   if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) { Write-Host 'ล็อกอัตโนมัติ (sleep / เปิดเครื่อง): เปิด' } else { Write-Host 'ล็อกอัตโนมัติ: ปิด (ccrm lock-auto on)' }
   $pl = Get-ProjListFile
   if ($l -and (Test-Path -LiteralPath $pl)) {
     $pr = @(Read-FileLines $pl | Where-Object { $_ })
     if ($pr.Count -gt 0) {
-      Write-Host '📁 โปรเจกต์ที่อยู่ในวอลต์:'
+      Write-Host ($icDir.Trim() + ' โปรเจกต์ที่อยู่ในวอลต์:')
       foreach ($ln in $pr) { $a = $ln -split "`t", 2; if ($a.Count -eq 2) { Write-Host ("   {0}  →  {1}:\{2}" -f (Show-P $a[0]), $l, $a[1]) } }
     }
   }
@@ -1046,7 +1085,7 @@ function Invoke-VaultSetup {
     }
     foreach ($e in @(Get-ExtDirs)) { $need += [long](Get-DirSize $e.Path) }
     $drive = New-Object System.IO.DriveInfo ($env:LOCALAPPDATA.Substring(0, 1))
-    Write-Host '🔐 ตั้งค่าล็อก session ด้วยรหัสผ่าน'
+    Write-Host ($icLock.Trim() + ' ตั้งค่าล็อก session ด้วยรหัสผ่าน')
     Write-Host 'จะเก็บ session และการล็อกอินของ Claude/Codex/Kimi/Gemini ไว้ในที่เก็บเข้ารหัส (VeraCrypt AES)'
     Write-Host 'ไม่ต้องย้ายอะไรเอง — session เดิมทั้งหมดจะถูกย้ายเข้าไปให้อัตโนมัติ ใช้ต่อได้เหมือนเดิม:'
     Show-Pending ''
@@ -1094,7 +1133,7 @@ function Invoke-VaultSetup {
   Install-VaultWrappers
   Set-SleepTask $true
   Write-Host ''
-  Write-Host 'เสร็จแล้ว 🔓 ตอนนี้ปลดล็อกอยู่ (เปิด terminal ใหม่ก่อนใช้ claude ให้ค่า CLAUDE_CONFIG_DIR มีผล)'
+  Write-Host ('เสร็จแล้ว ' + $icUnlock.Trim() + ' ตอนนี้ปลดล็อกอยู่ (เปิด terminal ใหม่ก่อนใช้ claude ให้ค่า CLAUDE_CONFIG_DIR มีผล)')
   Write-Host '  ล็อก: claude-lock (หรือ ccrm lock, Ctrl-L ใน ccrm) · ปลดล็อก: claude-unlock หรือแค่เปิด ccrm'
   if (Test-Path -LiteralPath $plainBackup) { Write-Host '  ⚠ ข้อมูลเดิมแบบไม่เข้ารหัสยังอยู่ที่ ~\.ccrm-plain-backup — ลองใช้งานให้แน่ใจแล้วสั่ง ccrm lock-cleanup' }
 }
@@ -1123,7 +1162,11 @@ function Invoke-VaultCleanup {
 $projMarkers = @('.git', 'package.json', 'composer.json', 'pyproject.toml', 'requirements.txt', 'setup.py', 'go.mod', 'Cargo.toml', 'pom.xml', 'build.gradle', 'Gemfile', 'pubspec.yaml', 'deno.json', 'Makefile', 'CMakeLists.txt', 'CLAUDE.md', 'AGENTS.md', '.claude', 'next.config.js', 'vite.config.ts', 'tsconfig.json')
 # ห้ามใช้ ⛔ ⚠ ใน popup: ใต้ fzf + ConPTY เขียนแล้วค้าง (ทดสอบบน VM) — ใช้ × ! แทน
 $ESC = [char]27
-$cB = "$ESC[1m"; $cD = "$ESC[2m"; $cR = "$ESC[31m"; $cG = "$ESC[32m"; $cY = "$ESC[33m"; $cC = "$ESC[36m"; $c0 = "$ESC[0m"
+# conhost ที่เปิด VT ไม่ได้ = ไม่มีสี (ไม่งั้นขึ้น ←[36m ดิบ)
+if ($script:VtOn) { $cB = "$ESC[1m"; $cD = "$ESC[2m"; $cR = "$ESC[31m"; $cG = "$ESC[32m"; $cY = "$ESC[33m"; $cC = "$ESC[36m"; $c0 = "$ESC[0m" }
+else { $cB = ''; $cD = ''; $cR = ''; $cG = ''; $cY = ''; $cC = ''; $c0 = '' }
+# ╭╰ ไม่มีในฟอนต์ conhost บางตัว — ใช้ ┌└ แทนเมื่อไม่ใช่ Windows Terminal
+if ($UseEmoji) { $bTL = '╭'; $bBL = '╰' } else { $bTL = '┌'; $bBL = '└' }
 
 function Get-ProjListFile { return (Join-Path $HOME '.claude\.ccrm\projects.tsv') }
 function Show-P([string]$p) { if ($p -and $p.StartsWith($HOME, [StringComparison]::OrdinalIgnoreCase)) { return '~' + $p.Substring($HOME.Length) }; return $p }
@@ -1132,22 +1175,26 @@ function Show-P([string]$p) { if ($p -and $p.StartsWith($HOME, [StringComparison
 function Get-UiWidth { $w = 80; try { $w = $Host.UI.RawUI.WindowSize.Width } catch {}; if (-not $w) { $w = 80 }; if ($w -gt 100) { $w = 100 }; return ($w - 4) }
 function Open-Ui([string]$title) {
   $w = Get-UiWidth
-  [Console]::Write("$ESC[?1049h$ESC[2J$ESC[H`n`n")
-  [Console]::WriteLine("  $cC╭─ $cB" + (Format-UiText $title) + "$c0$cC " + ('─' * [Math]::Max(4, $w - 24)) + $c0)
+  if ($script:VtOn) { [Console]::Write("$ESC[?1049h$ESC[2J$ESC[H") } else { try { [Console]::Clear() } catch {} }
+  [Console]::WriteLine(''); [Console]::WriteLine('')
+  [Console]::WriteLine("  $cC$bTL─ $cB" + (Format-UiText $title) + "$c0$cC " + ('─' * [Math]::Max(4, $w - 24)) + $c0)
   [Console]::WriteLine("  $cC│$c0")
 }
 # อีโมจิ (🔒📁⛔⚠) ใน popup ใต้ fzf ทำให้ ConPTY ค้างกลางทาง (ทดสอบบน VM ผ่าน ssh) — แปลงเป็นข้อความก่อนพิมพ์
 function Format-UiText([string]$t) {
+  if (-not $script:VtOn) { $t = $t -replace "$([char]27)\[[0-9;?]*[A-Za-z]", '' }
   return ($t -replace '🔒📁', '[ล็อก+โฟลเดอร์]' -replace '🔒', '[ล็อก]' -replace '📁', '' -replace '📂', '' -replace '⛔', '×' -replace '⚠', '!')
 }
 function Say([string]$t) { [Console]::WriteLine("  $cC│$c0  " + (Format-UiText $t) + $c0) }
 function Close-Ui {
   $w = Get-UiWidth
   [Console]::WriteLine("  $cC│$c0")
-  [Console]::WriteLine("  $cC╰" + ('─' * [Math]::Max(4, $w - 2)) + $c0)
-  [Console]::Write("`n  ${cD}กด Enter เพื่อกลับไปที่รายการ$c0 ")
+  [Console]::WriteLine("  $cC$bBL" + ('─' * [Math]::Max(4, $w - 2)) + $c0)
+  [Console]::WriteLine('')
+  [Console]::Write("  ${cD}กด Enter เพื่อกลับไปที่รายการ$c0 ")
   [void][Console]::ReadLine()
-  [Console]::Write("$ESC[?1049l")
+  if ($script:VtOn) { [Console]::Write("$ESC[?1049l") } else { try { [Console]::Clear() } catch {} }
+  Restore-ConsoleMode
 }
 function Ask-Line([string]$q) { [Console]::WriteLine("  $cC│$c0"); [Console]::Write("  $cC│$c0  $cY$q$c0"); $a = [Console]::ReadLine(); if ($null -eq $a) { return '' }; return $a }
 function Ask-Yes([string]$q) { return ((Ask-Line $q) -match '^[Yy]') }
@@ -1486,7 +1533,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 45
+$ver = 46
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
@@ -1520,7 +1567,7 @@ if (Test-VaultConfigured) {
   # เครื่องที่ตั้งก่อน v29 — เติมล็อกตอนเข้าสู่ระบบให้เอง ไม่ต้องสั่ง lock-auto ใหม่
   if (-not (Test-LogonLock)) { Set-SleepTask $true }
   if (-not (Test-VaultMounted)) {
-    Write-Host '🔒 session ถูกล็อกอยู่ (Enter ว่าง = ออก)'
+    Write-Host ($icLock.Trim() + ' session ถูกล็อกอยู่ (Enter ว่าง = ออก)')
     if (-not (Invoke-VaultUnlock)) { exit 1 }
     # Enter ที่ค้างจากช่องรหัสจะหลุดเข้า fzf กลายเป็นกด resume — ล้างทิ้งก่อน
     try { $Host.UI.RawUI.FlushInputBuffer() } catch {}
@@ -1528,9 +1575,9 @@ if (Test-VaultConfigured) {
   # วอลต์ที่ตั้งก่อน v35 — ACL ยังเปิดให้ Users (codex ไม่ยอมทำงาน) แก้ให้ตอนเปิด ccrm
   $vl = Get-VaultLetter
   if ($vl) { Protect-VaultDirs $vl }
-  $lockNote = '  |  🔓 Ctrl-L=ล็อก'
+  $lockNote = '  |  ' + $icUnlock.Trim() + ' Ctrl-L=ล็อก'
 } elseif (-not (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'ccrm-lock-nag-off')) -and (Get-Command fzf -ErrorAction SilentlyContinue)) {
-  $choice = Repair-FzfOut (@("setup`tตั้งค่าเลย (ccrm lock-setup)", "later`tไว้ทีหลัง", "never`tไม่ต้องถามอีก") | fzf --delimiter "`t" --with-nth 2.. --header '🔐 ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep' --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> ')
+  $choice = Repair-FzfOut (@("setup`tตั้งค่าเลย (ccrm lock-setup)", "later`tไว้ทีหลัง", "never`tไม่ต้องถามอีก") | fzf --delimiter "`t" --with-nth 2.. --header ($icLock.Trim() + ' ใหม่: เข้ารหัส session ทุกค่ายด้วยรหัสผ่าน + ล็อกอัตโนมัติตอน sleep') --no-multi --reverse --no-info --height ~6 --prompt 'เลือก> ')
   if ($choice -like 'setup*') { Invoke-VaultSetup; exit 0 }
   if ($choice -like 'never*') { [System.IO.File]::WriteAllText((Join-Path $env:LOCALAPPDATA 'ccrm-lock-nag-off'), '1') }
 }
@@ -1550,12 +1597,13 @@ if (-not $fzf) {
 $scriptPath = $PSCommandPath
 $psBase = 'powershell -NoProfile -ExecutionPolicy Bypass -File "' + $scriptPath + '"'
 # หัว 2 บรรทัด — บรรทัดเดียวยาวเกินช่องรายการ Ctrl-L ตกขอบมองไม่เห็น
-$h2 = if ($lockNote) { 'Enter=resume  Ctrl-E=ย้ายโปรเจกต์เข้า/ออกวอลต์ 📁  Tab=ลบ (กด 2 ครั้ง)  Ctrl-A=รีเฟรช  Esc=ยกเลิก' } else { 'Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก' }
+$h2 = if ($lockNote) { 'Enter=resume  Ctrl-E=ย้ายโปรเจกต์เข้า/ออกวอลต์ ' + $icDir.Trim() + '  Tab=ลบ (กด 2 ครั้ง)  Ctrl-A=รีเฟรช  Esc=ยกเลิก' } else { 'Enter=resume  Tab=เลือกลบ (กด Tab อีกครั้งยืนยัน)  Ctrl-A=รีเฟรช  Esc=ยกเลิก' }
+if ($lockNote -and -not $UseEmoji) { $h2 += '   ' + $icLock.Trim() + '=แชทในวอลต์ ' + $icDir.Trim() + '=โฟลเดอร์ในวอลต์' }
 $header = "รวม $($rows.Count) sessions  |  ccrm v$ver$lockNote  |  Ctrl-N=Claude ใหม่  Ctrl-X=Codex ใหม่$updateNote`n$h2"
 # 📂 โฟลเดอร์ของแถวที่เลือก — โชว์ที่ prompt (Mac โชว์เป็นบรรทัดที่ 3 ของหัว)
 # fzf บน Windows รัน transform ผ่าน cmd ธรรมดา: echo ทิ้ง CR (␍) ท้ายบรรทัด และไม่มี !VAR! ให้ใช้ — set /p พิมพ์โดยไม่ขึ้นบรรทัด
 # PS 5.1 ไม่ escape " ใน argument ที่ส่งให้ native — ต้องเขียน \" เอง
-$hdrCmd = 'transform-prompt:<nul set /p \"=📂 {r6}  > \"'
+$hdrCmd = 'transform-prompt:<nul set /p \"=' + $icOpen + ' {r6}  > \"'
 $hdrBinds = @('--bind', ('load:' + $hdrCmd), '--bind', ('focus:' + $hdrCmd))
 $previewCmd = $psBase + ' -PreviewLine -Line "{r}"'
 $allFlag = if ($All) { ' -All' } else { '' }
@@ -1575,7 +1623,7 @@ $picked = $rows | fzf --multi --delimiter "`t" --with-nth 2..5 @hdrBinds --heade
 
 if (-not $picked) {
   # Ctrl-L ล็อกแล้ว fzf ล้างจอทิ้ง — บอกผลอีกที
-  if ($lockNote -and -not (Test-VaultMounted)) { Write-Host '🔒 ล็อกแล้ว' }
+  if ($lockNote -and -not (Test-VaultMounted)) { Write-Host ($icLock.Trim() + ' ล็อกแล้ว') }
   exit 0
 }
 
