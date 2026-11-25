@@ -704,8 +704,24 @@ function Sync-VaultLinks([string]$letter, [bool]$adopt) {
       }
       if (Test-Path -LiteralPath $dst) {
         # v49: มีทั้งข้างนอกและในวอลต์ (AI สร้าง ~\$k ใหม่ตอน junction หาย) — รวมเข้าวอลต์: ไฟล์ใหม่/ใหม่กว่าจากข้างนอกชนะ ไม่ลบอะไรในวอลต์
-        & robocopy $src $dst /E /XO /COPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-        if ($LASTEXITCODE -ge 8) { Write-Host "  ✗ รวม ~\$k เข้าวอลต์ไม่สำเร็จ ไม่แตะของเดิม"; continue }
+        # v50: บอกเหตุผลด้วย — ที่ว่างในวอลต์ไม่พอ / ไฟล์ถูกเปิดค้าง / สิทธิ์
+        $needB = [long](Get-DirSize $src)
+        $freeB = try { (New-Object System.IO.DriveInfo $letter).AvailableFreeSpace } catch { -1 }
+        if ($freeB -ge 0 -and $needB -gt $freeB) {
+          Write-Host ("  ✗ ที่ว่างในวอลต์ไม่พอ: ~\$k ใช้ {0}B แต่วอลต์เหลือ {1}B — ไม่แตะของเดิม" -f (Format-Size $needB), (Format-Size $freeB))
+          Write-Host "    ลบของไม่ใช้ใน ~\$k (เช่น sessions เก่า) หรือขยายวอลต์ด้วย VeraCrypt แล้วรัน ccrm lock-setup ใหม่"
+          continue
+        }
+        $rlog = Join-Path $env:TEMP 'ccrm-robocopy.log'
+        & robocopy $src $dst /E /XO /COPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP /UNILOG:$rlog | Out-Null
+        $rc = $LASTEXITCODE
+        if ($rc -ge 8) {
+          Write-Host "  ✗ รวม ~\$k เข้าวอลต์ไม่สำเร็จ (robocopy $rc) ไม่แตะของเดิม — สาเหตุ:"
+          Get-Content -LiteralPath $rlog -Encoding Unicode -ErrorAction SilentlyContinue | Select-String -Pattern 'ERROR' -Context 0, 1 | Select-Object -First 3 | ForEach-Object { Write-Host ('    ' + $_.Line.Trim()); foreach ($pc in $_.Context.PostContext) { Write-Host ('      ' + $pc.Trim()) } }
+          Write-Host "    บันทึกเต็มอยู่ที่ $rlog"
+          continue
+        }
+        Remove-Item -LiteralPath $rlog -Force -ErrorAction SilentlyContinue
         $miss = @(Get-ChildItem -LiteralPath $src -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { -not (Test-Path -LiteralPath ($dst + $_.FullName.Substring($src.Length))) })
         if ($miss.Count -gt 0) { Write-Host "  ✗ รวม ~\$k ไม่ครบ (ขาด $($miss.Count) ไฟล์) ไม่แตะของเดิม"; continue }
         $s1 = Get-TreeSig $src
@@ -1588,7 +1604,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 49
+$ver = 50
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
