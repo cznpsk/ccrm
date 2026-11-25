@@ -689,6 +689,9 @@ function Protect-VaultDirs([string]$letter) {
   if ($repair) { try { [System.IO.File]::WriteAllText($marker, '1') } catch {} }
 }
 
+function Restore-CodexSandbox([string]$src, $moved) {
+  foreach ($m in @($moved)) { try { Move-Item -LiteralPath $m.To -Destination (Join-Path $src $m.Name) -ErrorAction Stop } catch { Write-Host "  ! คืน $($m.Name) ไม่ได้ — อยู่ที่ $($m.To)" } }
+}
 function Sync-VaultLinks([string]$letter, [bool]$adopt) {
   foreach ($k in $vaultLinks.Keys) {
     $src = Join-Path $HOME $k
@@ -702,6 +705,19 @@ function Sync-VaultLinks([string]$letter, [bool]$adopt) {
         }
         continue
       }
+      # v51: Codex sandbox (.sandbox*) ตั้ง ACL ให้ user sandbox — เราอ่านไม่ได้ (robocopy ERROR 5) · ไม่ใช่แชท
+      # ย้ายไว้ ~\.codex-sandbox (rename ในไดรฟ์เดียวกัน ไม่ต้องอ่านไฟล์) แล้ว junction จากในวอลต์กลับไปหา
+      $sbMoved = @()
+      if ($k -eq '.codex') {
+        $sbHome = Join-Path $HOME '.codex-sandbox'
+        foreach ($sb in @(Get-ChildItem -LiteralPath $src -Directory -Force -Filter '.sandbox*' -ErrorAction SilentlyContinue)) {
+          New-Item -ItemType Directory -Force -Path $sbHome | Out-Null
+          $to = Join-Path $sbHome $sb.Name
+          if (Test-Path -LiteralPath $to) { $to = $to + '.' + (Get-Date -Format 'yyyyMMdd-HHmmss') }
+          try { Move-Item -LiteralPath $sb.FullName -Destination $to -ErrorAction Stop; $sbMoved += [pscustomobject]@{ Name = $sb.Name; To = $to } }
+          catch { Write-Host "  ! ย้าย ~\.codex\$($sb.Name) ออกไม่ได้: $($_.Exception.Message)" }
+        }
+      }
       if (Test-Path -LiteralPath $dst) {
         # v49: มีทั้งข้างนอกและในวอลต์ (AI สร้าง ~\$k ใหม่ตอน junction หาย) — รวมเข้าวอลต์: ไฟล์ใหม่/ใหม่กว่าจากข้างนอกชนะ ไม่ลบอะไรในวอลต์
         # v50: บอกเหตุผลด้วย — ที่ว่างในวอลต์ไม่พอ / ไฟล์ถูกเปิดค้าง / สิทธิ์
@@ -710,7 +726,7 @@ function Sync-VaultLinks([string]$letter, [bool]$adopt) {
         if ($freeB -ge 0 -and $needB -gt $freeB) {
           Write-Host ("  ✗ ที่ว่างในวอลต์ไม่พอ: ~\$k ใช้ {0}B แต่วอลต์เหลือ {1}B — ไม่แตะของเดิม" -f (Format-Size $needB), (Format-Size $freeB))
           Write-Host "    ลบของไม่ใช้ใน ~\$k (เช่น sessions เก่า) หรือขยายวอลต์ด้วย VeraCrypt แล้วรัน ccrm lock-setup ใหม่"
-          continue
+          Restore-CodexSandbox $src $sbMoved; continue
         }
         $rlog = Join-Path $env:TEMP 'ccrm-robocopy.log'
         & robocopy $src $dst /E /XO /COPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP /UNILOG:$rlog | Out-Null
@@ -719,21 +735,25 @@ function Sync-VaultLinks([string]$letter, [bool]$adopt) {
           Write-Host "  ✗ รวม ~\$k เข้าวอลต์ไม่สำเร็จ (robocopy $rc) ไม่แตะของเดิม — สาเหตุ:"
           Get-Content -LiteralPath $rlog -Encoding Unicode -ErrorAction SilentlyContinue | Select-String -Pattern 'ERROR' -Context 0, 1 | Select-Object -First 3 | ForEach-Object { Write-Host ('    ' + $_.Line.Trim()); foreach ($pc in $_.Context.PostContext) { Write-Host ('      ' + $pc.Trim()) } }
           Write-Host "    บันทึกเต็มอยู่ที่ $rlog"
-          continue
+          Restore-CodexSandbox $src $sbMoved; continue
         }
         Remove-Item -LiteralPath $rlog -Force -ErrorAction SilentlyContinue
         $miss = @(Get-ChildItem -LiteralPath $src -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { -not (Test-Path -LiteralPath ($dst + $_.FullName.Substring($src.Length))) })
-        if ($miss.Count -gt 0) { Write-Host "  ✗ รวม ~\$k ไม่ครบ (ขาด $($miss.Count) ไฟล์) ไม่แตะของเดิม"; continue }
+        if ($miss.Count -gt 0) { Write-Host "  ✗ รวม ~\$k ไม่ครบ (ขาด $($miss.Count) ไฟล์) ไม่แตะของเดิม"; Restore-CodexSandbox $src $sbMoved; continue }
         $s1 = Get-TreeSig $src
         Write-Host "  ✓ รวม ~\$k เข้าของเดิมในวอลต์แล้ว"
       } else {
       & robocopy $src $dst /E /COPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-      if ($LASTEXITCODE -ge 8) { Write-Host "  ✗ copy ~\$k ไม่สำเร็จ ไม่แตะของเดิม"; continue }
+      if ($LASTEXITCODE -ge 8) { Write-Host "  ✗ copy ~\$k ไม่สำเร็จ ไม่แตะของเดิม"; Restore-CodexSandbox $src $sbMoved; continue }
       $s1 = Get-TreeSig $src; $s2 = Get-TreeSig $dst
-      if ($s1 -ne $s2) { Write-Host "  ✗ ~\$k copy ไม่ครบ ($s1 ≠ $s2) ไม่แตะของเดิม"; Remove-Item -LiteralPath $dst -Recurse -Force; continue }
+      if ($s1 -ne $s2) { Write-Host "  ✗ ~\$k copy ไม่ครบ ($s1 ≠ $s2) ไม่แตะของเดิม"; Remove-Item -LiteralPath $dst -Recurse -Force; Restore-CodexSandbox $src $sbMoved; continue }
       }
       New-Item -ItemType Directory -Force -Path $plainBackup | Out-Null
       Move-Item -LiteralPath $src -Destination (Join-Path $plainBackup ($k + '.' + (Get-Date -Format 'yyyyMMdd-HHmmss')))
+      foreach ($m in $sbMoved) {
+        $jl = Join-Path $dst $m.Name
+        if (-not (Test-Path -LiteralPath $jl)) { try { New-Item -ItemType Junction -Path $jl -Target $m.To -ErrorAction Stop | Out-Null } catch { Write-Host "  ! junction $($m.Name) ไม่สำเร็จ — Codex จะตั้ง sandbox ใหม่เอง" } }
+      }
       Write-Host "  ✓ ย้าย ~\$k เข้าวอลต์แล้ว ($($s1.Split(' ')[0]) ไฟล์)"
     }
     if (-not (Test-Path -LiteralPath $dst)) {
@@ -1604,7 +1624,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 50
+$ver = 51
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
