@@ -165,6 +165,28 @@ function Get-ClaudeLabel([string]$sPath) {
   return '(ว่าง)'
 }
 
+# โฟลเดอร์จริงหลังตาม junction/symlink ทุกชั้น (รวม junction ที่อยู่ระดับพ่อ) — ไว้ดูว่าแชทอยู่บนไดรฟ์วอลต์ไหม
+# PS บางรุ่นคืน Target เป็น \??\V:\... หรือ \\?\V:\... — ตัดออกก่อนเทียบ · memo กันอ่านซ้ำ/วน
+function Get-RealDir([string]$d, [hashtable]$memo, [int]$depth = 0) {
+  $d = $d.TrimEnd('\', '/')
+  if (-not $d) { return $d }
+  if ($memo.ContainsKey($d)) { return $memo[$d] }
+  $par = Split-Path $d -Parent
+  if (-not $par -or $depth -gt 40) { $memo[$d] = $d; return $d }
+  $r = Join-Path (Get-RealDir $par $memo ($depth + 1)) (Split-Path $d -Leaf)
+  $memo[$d] = $r
+  $it = Get-Item -LiteralPath $r -Force -ErrorAction SilentlyContinue
+  if ($it -and $it.LinkType) {
+    $t = ([string]@($it.Target)[0]) -replace '^(\\\\\?\\|\\\?\?\\)', ''
+    if ($t) {
+      if (-not [System.IO.Path]::IsPathRooted($t)) { $t = Join-Path (Split-Path $r -Parent) $t }
+      $r = Get-RealDir $t $memo ($depth + 1)
+      $memo[$d] = $r
+    }
+  }
+  return $r
+}
+
 # ที่เก็บ session ทุกที่: ที่ปกติ + ที่ตั้งผ่านตัวแปร (ถ้าเป็นที่อื่น) — โชว์ครบทุกที่
 function Get-Roots([string]$var, [string]$def) {
   $d = Join-Path $HOME $def
@@ -398,6 +420,7 @@ function Get-SessionRows([bool]$includeAll) {
   $encRoots = @()
   $inVault = @()
   $cwdCache = @{}
+  $realMemo = @{}
   $cwdFile = $null
   $cwdNew = New-Object System.Text.StringBuilder
   if ($vl) {
@@ -406,7 +429,7 @@ function Get-SessionRows([bool]$includeAll) {
     foreach ($r in @(Get-Roots 'CLAUDE_CONFIG_DIR' '.claude') + @(Get-Roots 'CODEX_HOME' '.codex') + @((Join-Path $HOME '.kimi-code'), (Join-Path $HOME '.gemini'))) {
       $it = Get-Item -LiteralPath $r -Force -ErrorAction SilentlyContinue
       if (-not $it) { continue }
-      $t = if ($it.LinkType -eq 'Junction') { [string]@($it.Target)[0] } else { $it.FullName }
+      $t = if ($it.LinkType) { ([string]@($it.Target)[0]) -replace '^(\\\\\?\\|\\\?\?\\)', '' } else { $it.FullName }
       if ($t -like ($vl + ':\*')) { $encRoots += ($r.TrimEnd('\') + '\') }
     }
     # โปรเจกต์ที่ย้ายเข้าวอลต์แล้วทิ้ง junction ไว้ที่เดิม (จดไว้ใน ext-links.txt)
@@ -468,6 +491,11 @@ function Get-SessionRows([bool]$includeAll) {
     if ($vl) {
       $ic = '  '
       foreach ($pre in $encRoots) { if ($item.RefPath -like ($pre + '*')) { $ic = $icLock; break } }
+      # ไม่ตรง root ที่รู้จัก (junction ซ้อน/ระดับพ่อ/Target รูปแบบแปลก) — ตาม path จริงของโฟลเดอร์แชท
+      if ($ic -eq '  ') {
+        $rd = Get-RealDir (Split-Path $item.RefPath -Parent) $realMemo
+        if ($rd -like ($vl + ':\*')) { $ic = $icLock }
+      }
       $pf = '  '
       if ($cw) {
         foreach ($pre in $inVault) {
@@ -667,7 +695,13 @@ function Sync-VaultLinks([string]$letter, [bool]$adopt) {
     $dst = $letter + ':\' + $vaultLinks[$k]
     $it = Get-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue
     if ($it -and $it.LinkType -ne 'Junction') {
-      if (-not $adopt) { continue }
+      if (-not $adopt) {
+        # เป็นโฟลเดอร์จริงนอกวอลต์ (ย้ายไม่ครบตอน setup หรือ AI สร้างใหม่ตอนล็อกอยู่) — แชทในนั้นไม่ได้เข้ารหัส
+        if (Get-ChildItem -LiteralPath $src -Force -ErrorAction SilentlyContinue | Select-Object -First 1) {
+          Write-Host "  ⚠ ~\$k ยังอยู่นอกวอลต์ (แชทในนั้นไม่ได้เข้ารหัส ไม่มีไอคอนล็อก) — สั่ง ccrm lock-setup เพื่อย้ายเข้า"
+        }
+        continue
+      }
       if (Test-Path -LiteralPath $dst) { Write-Host "  ! มีทั้ง ~\$k และในวอลต์ ไม่แตะ — รวมเองแล้วรัน ccrm lock-setup ใหม่"; continue }
       & robocopy $src $dst /E /COPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
       if ($LASTEXITCODE -ge 8) { Write-Host "  ✗ copy ~\$k ไม่สำเร็จ ไม่แตะของเดิม"; continue }
@@ -910,6 +944,18 @@ function Show-VaultStatus {
   if (-not (Test-VaultConfigured)) { Write-Host 'ยังไม่ได้ตั้งค่าล็อก — พิมพ์ ccrm lock-setup'; return }
   $l = Get-VaultLetter
   if ($l) { Write-Host ($icUnlock.Trim() + " ปลดล็อกอยู่ (ไดรฟ์ ${l}:)") } else { Write-Host ($icLock.Trim() + ' ล็อกอยู่') }
+  if ($l) {
+    # ที่เก็บแชทแต่ละค่ายอยู่ไหนจริง — ไม่อยู่ในวอลต์ = ไม่มีไอคอนล็อกหน้าแถว
+    $labels = @{ '.claude' = 'Claude'; '.codex' = 'Codex'; '.kimi-code' = 'Kimi'; '.gemini' = 'Gemini' }
+    $memo = @{}
+    foreach ($r in @(Get-Roots 'CLAUDE_CONFIG_DIR' '.claude') + @(Get-Roots 'CODEX_HOME' '.codex') + @((Join-Path $HOME '.kimi-code'), (Join-Path $HOME '.gemini'))) {
+      if (-not (Test-Path -LiteralPath $r)) { continue }
+      $rd = Get-RealDir $r $memo
+      $nm = $labels[(Split-Path $r -Leaf)]; if (-not $nm) { $nm = Show-P $r }
+      if ($rd -like ($l + ':\*')) { Write-Host ("  {0} {1,-7} {2}" -f $icLock.Trim(), $nm, $rd) }
+      else { Write-Host ("  ⚠ {0,-7} {1}  (นอกวอลต์ — ccrm lock-setup เพื่อย้ายเข้า)" -f $nm, $rd) }
+    }
+  }
   if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) { Write-Host 'ล็อกอัตโนมัติ (sleep / เปิดเครื่อง): เปิด' } else { Write-Host 'ล็อกอัตโนมัติ: ปิด (ccrm lock-auto on)' }
   $pl = Get-ProjListFile
   if ($l -and (Test-Path -LiteralPath $pl)) {
@@ -1533,7 +1579,7 @@ if ($PreviewLine) {
   exit 0
 }
 
-$ver = 47
+$ver = 48
 $verCache = Join-Path $env:LOCALAPPDATA 'ccrm-latest'
 # เช็คเวอร์ชันใหม่ทุกครั้งที่เปิด (รอไม่เกิน 3 วิ) — เน็ตหลุดใช้ค่าล่าสุดที่จำไว้
 $latest = $null
